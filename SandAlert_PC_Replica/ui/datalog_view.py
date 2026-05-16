@@ -132,7 +132,7 @@ class LogParserThread(QThread):
                         raw_data = np.array(buffer, dtype=np.float32)
                         # ====== 核心计算 ======
                         # 将整个文件的数据送入 DSP 提取纯声学能量
-                        _, _, _, _, window_energy = self.dsp.process_window(raw_data, self.threshold, self.factor)
+                        _, _, _, _, window_energy, _ = self.dsp.process_window(raw_data, self.threshold, self.factor)
                         
                         # 换算成物理克数并累加
                         file_mass = window_energy / self.factor

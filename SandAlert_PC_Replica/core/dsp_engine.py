@@ -72,5 +72,5 @@ class DSPEngine:
             # 瞬时出砂量 M = 能量 / (K*v^2)
             mass_rate = window_energy / k_v2
             
-        # 注意这里返回了 5 个值，多加了一个 window_energy
-        return rectified_signal, dynamic_threshold, ips, mass_rate, window_energy
+        # 注意这里返回了 6 个值，多加了一个 window_energy 和 valid_peaks
+        return rectified_signal, dynamic_threshold, ips, mass_rate, window_energy, valid_peaks

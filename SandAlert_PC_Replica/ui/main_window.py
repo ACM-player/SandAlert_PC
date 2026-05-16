@@ -241,6 +241,10 @@ class MainWindow(QMainWindow):
             if not self.datalog_view.parser_thread.wait(2000):
                 print("[Shutdown] 警告：历史日志解析线程未能在 2 秒内退出")
 
-        # 3. 接受关闭事件
+        # 3. 停止 TDOA 后台工作线程（SignalTracesTab）
+        if hasattr(self, 'signal_tab') and hasattr(self.signal_tab, 'stop_all_workers'):
+            self.signal_tab.stop_all_workers()
+
+        # 4. 接受关闭事件
         print("[Shutdown] 所有后台线程已安全终止，窗口即将关闭。")
         event.accept()
