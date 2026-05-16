@@ -1,0 +1,19 @@
+# Mac 系统隐藏文件
+.DS_Store
+
+# Python 缓存和虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+playground/
+
+# 打包生成的庞大文件夹和文件
+build/
+dist/
+*.spec
+*.app
+
+# 你本地的现场测试数据
+*.txt

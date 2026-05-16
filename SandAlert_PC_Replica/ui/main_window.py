@@ -1,0 +1,246 @@
+# =============================================================================
+# SandAlert PC - 主窗口
+# =============================================================================
+# 说明：本文件是 SandAlert 上位机的主窗口，负责：
+#   1. 使用 QStackedWidget 实现"实时监测"与"历史日志"双模式切换
+#   2. 通过菜单栏的 Operation 菜单切换两种模式
+#   3. Setup -> Comm Settings... 弹出 SetupDialog，支持两种数据源：
+#      a) 串口模式：连接真实硬件或虚拟串口（mock_hardware.py）
+#      b) 文件回放模式：从本地 .txt 文件回放数据（无硬件时的替代方案）
+#   4. 统一管理阈值绑定、标定流程、报警阈值等信号/槽连接
+#   5. closeEvent 安全终止所有后台线程，防止 Python 崩溃
+# =============================================================================
+
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QFileDialog, QStackedWidget
+from PySide6.QtGui import QActionGroup, QAction
+
+from ui.tabs.signal_traces import SignalTracesTab
+from ui.tabs.parameters import ParametersTab
+from ui.datalog_view import DataLogWidget
+from ui.dialogs.setup_dialog import SetupDialog  # 通信设置对话框
+from core.comm import FileReplayThread, SerialReaderThread
+
+class MainWindow(QMainWindow):
+    """SandAlert PC 主窗口：含实时监测和历史日志双模式"""
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("SandAlert PC - Advanced Localization Version")
+        self.resize(1000, 700)
+        
+        # ====== 当前活跃的通信线程引用（用于 closeEvent 安全关闭） ======
+        self.active_thread = None
+        
+        # ====== 使用 QStackedWidget 作为主容器，实现双模式无缝切换 ======
+        self.stacked_widget = QStackedWidget()
+        self.setCentralWidget(self.stacked_widget)
+        
+        # ---- 模式1：实时监测面板 (索引 0) ----
+        self.main_tabs = QTabWidget()
+        self.signal_tab = SignalTracesTab()
+        self.param_tab = ParametersTab()
+        self.main_tabs.addTab(self.signal_tab, "Signal Traces")
+        self.main_tabs.addTab(self.param_tab, "Parameters")
+        
+        # ---- 模式2：历史日志面板 (索引 1) ----
+        self.datalog_view = DataLogWidget()
+        
+        self.stacked_widget.addWidget(self.main_tabs)    # Index 0
+        self.stacked_widget.addWidget(self.datalog_view) # Index 1
+        
+        self.init_menu_bar()
+        self.bind_signals()
+
+    def bind_signals(self):
+        """统一管理内部的信号与槽绑定"""
+        # ---- 阈值绑定 ----
+        self.param_tab.p160_input.textChanged.connect(self.on_threshold_changed)
+        self.on_threshold_changed(self.param_tab.p160_input.text())
+        
+        # ---- 标定系统绑定 ----
+        self.param_tab.btn_start_calib.clicked.connect(self.start_calibration)
+        self.param_tab.btn_stop_calib.clicked.connect(self.stop_calibration)
+        self.param_tab.factor_input.textChanged.connect(self.on_factor_changed)
+
+        # ---- 报警阈值绑定 ----
+        self.param_tab.caution_level_input.textChanged.connect(self.on_alarm_levels_changed)
+        self.param_tab.alarm_level_input.textChanged.connect(self.on_alarm_levels_changed)
+
+        # ---- 历史日志分析按钮绑定 ----
+        self.datalog_view.btn_load_log.clicked.connect(self.load_historical_logs)
+
+    def init_menu_bar(self):
+        """初始化菜单栏"""
+        menubar = self.menuBar()
+        
+        # File 菜单
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("Exit", self.close)
+        
+        # Operation 菜单
+        op_menu = menubar.addMenu("Operation")
+        self.op_group = QActionGroup(self)
+        
+        self.act_realtime = QAction("SandAlert PC", self, checkable=True)
+        self.act_realtime.setChecked(True)
+        self.act_datalog = QAction("DataLogging", self, checkable=True)
+        
+        self.op_group.addAction(self.act_realtime)
+        self.op_group.addAction(self.act_datalog)
+        
+        op_menu.addAction(self.act_realtime)
+        op_menu.addAction(self.act_datalog)
+        
+        self.act_realtime.triggered.connect(lambda: self.stacked_widget.setCurrentIndex(0))
+        self.act_datalog.triggered.connect(lambda: self.stacked_widget.setCurrentIndex(1))
+        
+        # Setup 菜单：弹出通信设置对话框
+        setup_menu = menubar.addMenu("Setup")
+        setup_action = QAction("Comm Settings...", self)
+        setup_action.triggered.connect(self.show_setup_dialog)
+        setup_menu.addAction(setup_action)
+        
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("About")
+
+    # ==================== 回调函数 ====================
+
+    def on_threshold_changed(self, text):
+        """当用户在 Parameters 页面修改阈值时，实时同步到 signal_tab"""
+        try:
+            new_th = float(text)
+            self.signal_tab.user_threshold = new_th
+        except ValueError:
+            pass
+
+    def on_factor_changed(self, text):
+        """当用户手动修改 Factor 时，实时同步到 signal_tab"""
+        try:
+            new_factor = float(text)
+            if new_factor > 0:
+                self.signal_tab.K_v2 = new_factor
+        except ValueError:
+            pass
+
+    def on_alarm_levels_changed(self):
+        """当用户修改报警阈值时，实时同步到 signal_tab"""
+        try:
+            new_caution = float(self.param_tab.caution_level_input.text())
+            new_alarm = float(self.param_tab.alarm_level_input.text())
+            self.signal_tab.caution_limit = new_caution
+            self.signal_tab.alarm_limit = new_alarm
+        except ValueError:
+            pass
+
+    def start_calibration(self):
+        """开始标定：清空能量池，进入累加模式"""
+        self.signal_tab.is_calibrating = True
+        self.signal_tab.accumulated_energy = 0.0
+        self.param_tab.btn_start_calib.setEnabled(False)
+        self.param_tab.btn_stop_calib.setEnabled(True)
+        self.param_tab.lbl_calib_status.setText("Status: Accumulating Acoustic Energy... Please inject sand now!")
+        self.param_tab.lbl_calib_status.setStyleSheet("color: red; font-weight: bold;")
+
+    def stop_calibration(self):
+        """停止标定：计算出专属转换系数并应用"""
+        self.signal_tab.is_calibrating = False
+        self.param_tab.btn_start_calib.setEnabled(True)
+        self.param_tab.btn_stop_calib.setEnabled(False)
+        try:
+            injected_mass = float(self.param_tab.calib_mass_input.text())
+            total_energy = self.signal_tab.accumulated_energy
+            if total_energy == 0:
+                self.param_tab.lbl_calib_status.setText("Status: Failed. No sand impacts detected.")
+                self.param_tab.lbl_calib_status.setStyleSheet("color: orange;")
+                return
+            new_factor = total_energy / injected_mass
+            self.param_tab.factor_input.setText(f"{new_factor:.6f}")
+            self.param_tab.lbl_calib_status.setText(f"Status: Success! Factor Applied. Total Energy: {total_energy:.4f}")
+            self.param_tab.lbl_calib_status.setStyleSheet("color: green; font-weight: bold;")
+        except ValueError:
+            self.param_tab.lbl_calib_status.setText("Status: Error. Invalid Mass Input.")
+
+    def show_setup_dialog(self):
+        """
+        弹出通信设置对话框，支持两种数据源：
+        
+        1. 串口模式（默认）：
+           - 用户选择串口号和波特率
+           - 连接真实硬件或虚拟串口（mock_hardware.py）
+           - 使用 SerialReaderThread 读取数据
+        
+        2. 文件回放模式：
+           - 用户选择包含 .txt 文件的文件夹
+           - 使用 FileReplayThread 回放数据（无硬件时的替代方案）
+        """
+        dialog = SetupDialog(self)
+        if dialog.exec():
+            # 用户点击了 "Save & Connect"
+            
+            # ---- 先停止当前正在运行的任何线程 ----
+            self.stop_active_thread()
+            
+            # ---- 获取用户在对话框中设置的值 ----
+            port = dialog.com_combo.currentText()
+            baudrate = dialog.baud_combo.currentText()
+            use_file_replay = dialog.file_replay_mode  # 是否使用文件回放模式
+            
+            if use_file_replay:
+                # ====== 文件回放模式 ======
+                data_dir = QFileDialog.getExistingDirectory(
+                    self, "选择存放现场数据文件的文件夹", "/"
+                )
+                if data_dir:
+                    print(f"\n[调试] 文件回放模式，选中路径: {data_dir}")
+                    self.active_thread = FileReplayThread(data_dir)
+                    self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
+                    self.active_thread.status_msg.connect(lambda msg: print(f"SYS MSG: {msg}"))
+                    self.active_thread.start()
+            else:
+                # ====== 串口模式 ======
+                print(f"\n[调试] 串口模式，连接 {port}，波特率 {baudrate}")
+                self.active_thread = SerialReaderThread(port, baudrate)
+                self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
+                self.active_thread.status_msg.connect(lambda msg: print(f"SERIAL: {msg}"))
+                self.active_thread.start()
+    
+    def stop_active_thread(self):
+        """
+        安全停止当前活跃的通信线程。
+        在切换数据源或关闭窗口时调用。
+        """
+        if self.active_thread is not None and self.active_thread.isRunning():
+            print("[调试] 正在停止当前通信线程...")
+            self.active_thread.stop()
+            self.active_thread = None
+    
+    def load_historical_logs(self):
+        """
+        加载历史日志：弹出 Mac 原生文件夹选择器
+        """
+        data_dir = QFileDialog.getExistingDirectory(self, "选择存放历史现场数据的文件夹进行宏观分析", "/")
+        
+        if data_dir:
+            current_threshold = self.signal_tab.user_threshold
+            current_factor = self.signal_tab.K_v2
+            self.datalog_view.start_parsing(data_dir, current_threshold, current_factor)
+
+    # ==================== 安全关闭：优雅终止所有后台线程 ====================
+    def closeEvent(self, event):
+        """
+        重写窗口关闭事件，确保在 UI 销毁前安全终止所有后台线程。
+        """
+        print("[Shutdown] 正在安全关闭所有后台线程...")
+
+        # 1. 停止活跃的通信线程（串口或文件回放）
+        self.stop_active_thread()
+
+        # 2. 停止历史日志解析线程
+        if hasattr(self.datalog_view, 'parser_thread') and self.datalog_view.parser_thread.isRunning():
+            print("[Shutdown] 正在停止历史日志解析线程...")
+            self.datalog_view.parser_thread.stop()
+            if not self.datalog_view.parser_thread.wait(2000):
+                print("[Shutdown] 警告：历史日志解析线程未能在 2 秒内退出")
+
+        # 3. 接受关闭事件
+        print("[Shutdown] 所有后台线程已安全终止，窗口即将关闭。")
+        event.accept()
