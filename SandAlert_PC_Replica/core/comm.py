@@ -24,13 +24,22 @@ class SerialReaderThread(QThread):
     """
     串口数据读取线程：从 CH340（或虚拟串口）读取高频声学数据。
     
-    数据格式：每行一个浮点数（电压值），以换行符分隔。
-    例如：
+    支持两种数据格式（自动检测）：
+    
+    格式 1 — 逗号分隔的 4 通道（推荐，兼容未来硬件）:
+        -2.835,-2.840,-2.838,-2.842
+        -2.841,-2.843,-2.839,-2.844
+    
+    格式 2 — 单值（向后兼容）:
         -2.835
         -2.841
-        -2.798
     
-    每凑满 chunk_size（默认 50）个数据点，打包成 numpy 数组发射一次。
+    发射的数据格式：
+    - 如果检测到 4 通道数据：发射 (4, chunk_size) ndarray
+    - 如果检测到单值数据：发射 (chunk_size,) ndarray（向后兼容）
+    
+    每凑满 chunk_size（默认 50）帧打包发射一次。
+    注：在 4 通道模式下，50 帧 = 50×4 = 200 个 float
     """
     # 修复点：必须用 object 类型，否则 PySide6 会在跨线程传递 numpy 数组时静默丢弃数据
     data_received = Signal(object)
@@ -50,9 +59,84 @@ class SerialReaderThread(QThread):
         self.serial_port = None
         self._is_running = False
         
-        # 数据缓冲区：每积攒 50 个数据点发射一次，避免 UI 刷新过快卡死
+        # 数据缓冲区
+        # - 单通道模式：buffer 为 list[float]，每攒 50 个发射
+        # - 4 通道模式：buffer 为 list[tuple]，每攒 50 帧发射
         self.chunk_size = 50
         self.buffer = []
+        
+        # 数据格式检测标志
+        # None = 未检测, 1 = 单值模式, 4 = 4 通道模式
+        self._format = None
+
+    def _detect_format(self, decoded: str) -> int:
+        """
+        检测首次有效数据的格式：单值还是逗号分隔的 4 通道。
+        
+        参数
+        ----------
+        decoded : str
+            解码后的一行原始数据。
+        
+        返回
+        -------
+        int
+            1（单值模式）或 4（4 通道模式）。
+        """
+        # 按逗号分割
+        parts = decoded.strip().split(',')
+        
+        if len(parts) == 4:
+            return 4
+        else:
+            return 1
+
+    def _parse_line(self, decoded: str):
+        """
+        解析一行数据，根据检测到的格式存入缓冲区。
+        
+        参数
+        ----------
+        decoded : str
+            解码后的一行原始数据。
+        """
+        if self._format == 4:
+            # 4 通道模式：按逗号分割，解析 4 个 float
+            parts = decoded.strip().split(',')
+            if len(parts) != 4:
+                return  # 格式异常，静默丢弃
+            try:
+                ch1, ch2, ch3, ch4 = map(float, parts)
+                self.buffer.append((ch1, ch2, ch3, ch4))
+            except ValueError:
+                pass  # 脏数据，丢弃
+        else:
+            # 单通道模式：直接解析为 float
+            try:
+                val = float(decoded)
+                self.buffer.append(val)
+            except ValueError:
+                pass  # 脏数据，丢弃
+
+    def _flush_buffer(self):
+        """
+        将缓冲区打包为 numpy 数组并发射。
+        
+        4 通道模式：发射 shape (4, chunk_size) 数组
+        单通道模式：发射 shape (chunk_size,) 数组（向后兼容）
+        """
+        if not self.buffer:
+            return
+        
+        if self._format == 4:
+            # 4 通道模式：转置为 (4, N)
+            np_data = np.array(self.buffer, dtype=np.float32).T  # shape (4, N)
+        else:
+            # 单通道模式：简单列表转数组
+            np_data = np.array(self.buffer, dtype=np.float32)
+        
+        self.data_received.emit(np_data)
+        self.buffer.clear()
 
     def run(self):
         """
@@ -61,8 +145,9 @@ class SerialReaderThread(QThread):
         流程：
         1. 尝试打开串口
         2. 循环读取每行数据
-        3. 解析为浮点数，存入缓冲区
-        4. 缓冲区满时打包发射
+        3. 自动检测数据格式（单值 vs. 4 通道）
+        4. 解析并存入缓冲区
+        5. 缓冲区满时打包发射
         """
         import serial  # 延迟导入，避免没有安装 pyserial 时导入报错
         
@@ -83,9 +168,10 @@ class SerialReaderThread(QThread):
             return
 
         # 主读取循环
+        format_reported = False
         while self._is_running and self.serial_port.is_open:
             try:
-                # 按行读取（每行一个浮点数）
+                # 按行读取
                 raw_line = self.serial_port.readline()
                 
                 if not raw_line:
@@ -95,20 +181,27 @@ class SerialReaderThread(QThread):
                 # 解码并去除首尾空白字符
                 decoded = raw_line.decode('utf-8', errors='ignore').strip()
                 
-                if decoded:
-                    try:
-                        voltage_val = float(decoded)
-                        self.buffer.append(voltage_val)
-                        
-                        # 缓冲区满了，打包发射
-                        if len(self.buffer) >= self.chunk_size:
-                            np_data = np.array(self.buffer, dtype=np.float32)
-                            self.data_received.emit(np_data)
-                            self.buffer.clear()
-                            
-                    except ValueError:
-                        # 忽略无法转换为 float 的脏数据（如串口刚连接时的乱码）
-                        pass
+                if not decoded:
+                    continue
+                
+                # ---- 自动检测数据格式（仅在首次有效数据时执行） ----
+                if self._format is None:
+                    self._format = self._detect_format(decoded)
+                    if self._format == 4:
+                        self.status_msg.emit(
+                            "✅ 检测到 4 通道阵列数据格式 (逗号分隔)"
+                        )
+                    else:
+                        self.status_msg.emit(
+                            "✅ 检测到单通道数据格式 (向后兼容模式)"
+                        )
+                
+                # ---- 解析当前行 ----
+                self._parse_line(decoded)
+                
+                # ---- 缓冲区满则发射 ----
+                if len(self.buffer) >= self.chunk_size:
+                    self._flush_buffer()
                         
             except serial.SerialException as e:
                 self.status_msg.emit(f"⚠️ 串口读取错误: {str(e)}")
@@ -116,6 +209,10 @@ class SerialReaderThread(QThread):
             except Exception as e:
                 self.status_msg.emit(f"⚠️ 读取异常: {str(e)}")
                 break
+        
+        # 线程退出前，清空剩余数据
+        if self.buffer:
+            self._flush_buffer()
 
     def stop(self):
         """

@@ -14,10 +14,15 @@ TDOA 异步计算工作线程。
   4. 工作线程在后台完成 GCC-PHAT + 网格搜索
   5. 通过信号 doa_result 或 doa_error 回传结果
 
+健壮性：
+  - 内部耗时统计，超过代价门槛则发射 doa_likelihood_low
+  - 绝不阻塞 UI 主线程
+
 作者：AI Assistant
-日期：2026-05-16
+日期：2026-05-17
 """
 
+import time
 import numpy as np
 from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
 from queue import Queue, Empty
@@ -36,12 +41,19 @@ class TDOAWorker(QThread):
         - est_angle_deg: 估计的方位角（度）
         - cost_min: 代价函数最小值（越小越可靠）
         - tdoa_obs: 观测时延向量 (numpy array, shape (m-1,))
+    doa_likelihood_low : Signal(float)
+        发射参数：(cost_min)
+        当最小代价值超过阈值，表示似然极低、可能是杂波干扰。
     doa_error : Signal(str)
         发射参数：错误描述字符串
     """
 
+    # ---- 似然门槛常量 ----
+    COST_LIKELY_THRESHOLD = 1e-8   # 代价值低于此门槛才算可靠
+
     # ====== 信号定义 ======
     doa_result = Signal(float, float, object)
+    doa_likelihood_low = Signal(float)
     doa_error = Signal(str)
 
     def __init__(
@@ -177,15 +189,22 @@ class TDOAWorker(QThread):
 
             try:
                 # ---- 执行一站式 DOA 估计 ----
+                t0 = time.perf_counter()
                 est_angle, tdoa_obs, angles, costs = (
                     self._engine.compute_doa(X)
                 )
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-                # ---- 计算代价函数最小值（评估估计可靠性） ----
+                # ---- 评估估计可靠性 ----
                 cost_min = float(np.min(costs))
 
-                # ---- 发射结果信号（跨线程安全） ----
-                self.doa_result.emit(est_angle, cost_min, tdoa_obs)
+                if cost_min > self.COST_LIKELY_THRESHOLD:
+                    # 似然极低：可能是杂波偶然越过了阈值
+                    # 不发射 doa_result，只发射低似然警告
+                    self.doa_likelihood_low.emit(cost_min)
+                else:
+                    # 可靠估计 → 发射结果信号
+                    self.doa_result.emit(est_angle, cost_min, tdoa_obs)
 
             except Exception as e:
                 self.doa_error.emit(f"TDOA 计算异常: {str(e)}")

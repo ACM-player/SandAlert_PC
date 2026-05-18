@@ -1,5 +1,7 @@
+import time
 import numpy as np
 from scipy.signal import find_peaks
+
 import pyqtgraph as pg
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                                QCheckBox, QLineEdit, QProgressBar, QPushButton,
@@ -218,6 +220,11 @@ class SignalTracesTab(QWidget):
             (4, self.MULTI_CH_BUF_LEN), -2.85, dtype=np.float32
         )
         
+        # ====== TDOA 限流抽帧（Rate Limiter） ======
+        self.last_tdoa_time = 0.0           # 上次 TDOA 派发时间戳
+        self.TDOA_MIN_INTERVAL = 0.1        # 最小派发间隔（秒）≈ 每秒最多 10 次
+        self.TDOA_QUEUE_WARN_THRESHOLD = 5  # 队列积压超过此值则清空
+
         # ====== TDOA 异步工作线程 ======
         self.tdoa_worker = TDOAWorker(
             fs=2_000_000,   # TDOA 引擎采样率 2 MHz
@@ -227,7 +234,9 @@ class SignalTracesTab(QWidget):
         # 连接信号
         self.tdoa_worker.doa_result.connect(self.on_tdoa_result)
         self.tdoa_worker.doa_error.connect(self.on_tdoa_error)
+        self.tdoa_worker.doa_likelihood_low.connect(self.on_doa_likelihood_low)
         # 注意：tdoa_worker 在需要时由 on_tdoa_toggled 启动/停止
+
     
     # ================================================================
     #  极坐标网格绘制
@@ -380,10 +389,28 @@ class SignalTracesTab(QWidget):
         self.tdoa_status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
         print(f"[TDOA] 错误: {error_msg}")
 
+    def on_doa_likelihood_low(self, cost_min: float):
+        """
+        当 TDOA 计算结果代价值过高（似然极低）时回调。
+        不更新红星，在状态栏显示橙色警告。
+
+        参数
+        ----------
+        cost_min : float
+            最小代价值（超出似然门槛）。
+        """
+        self.tdoa_status_label.setText(
+            f"⚠️ 杂波干扰 (Low Likelihood: {cost_min:.2e})"
+        )
+        self.tdoa_status_label.setStyleSheet(
+            "color: #e67e22; font-weight: bold; font-style: italic;"
+        )
+
     # ================================================================
     #  切窗打地鼠：生成 4 通道 Mock 阵列数据
     # ================================================================
     def _generate_mock_multi_ch_slice(self, peak_idx_in_window: int):
+
         """
         当检测到有效撞击峰值时，以该峰值为中心生成模拟的 4 通道阵列数据切片。
         
@@ -434,30 +461,65 @@ class SignalTracesTab(QWidget):
     # ==================== 核心数据更新入口 ====================
     def update_from_serial(self, new_data):
         """
-        接收 QThread 传来的真实一维 numpy 数组，送入 DSP 处理并更新图表。
-        同时在此方法中完成：
+        接收 QThread 传来的 numpy 数组，支持两种格式（自动适配）：
+        
+        格式 1 — shape (4, N) : 4 通道阵列数据（TDOA 模式）
+            new_data[0] = Ch.1  → 送入 DSPEngine 维持出砂量折线图
+            new_data[0~3]      → 填充 multi_channel_buffer 供 TDOA 切片
+        
+        格式 2 — shape (N,) : 单通道数据（向后兼容，FileReplay 模式）
+            送入 DSPEngine，同时备份到 multi_channel_buffer 所有通道
+        
+        在此基础上完成：
           1. 三相分离器效率计算
           2. CSV 工业报表数据持久化
-          3. 【新增】TDOA 切窗打地鼠：检测到撞击峰值时，生成阵列切片送入 TDOAWorker
+          3. TDOA 切窗打地鼠：检测到撞击峰值时，从 multi_channel_buffer 截取
+             4 通道切片送入 TDOAWorker
         """
-        shift = len(new_data)
-        if shift == 0:
-            return
+        # ---- 检测数据格式 ----
+        if new_data.ndim == 2 and new_data.shape[0] == 4:
+            # ====== 4 通道阵列数据模式 ======
+            n_frames = new_data.shape[1]
+            if n_frames == 0:
+                return
             
-        # ---- 滚动并拼装原始数据 ----
-        self.voltage_data = np.roll(self.voltage_data, -shift)
-        self.voltage_data[-shift:] = new_data
+            # 提取 Ch.1 供 DSP 引擎处理（波形显示 + 出砂量评估）
+            ch1_data = new_data[0]
+            
+            # 滚动并更新波形通道
+            self.voltage_data = np.roll(self.voltage_data, -n_frames)
+            self.voltage_data[-n_frames:] = ch1_data
+            
+            # 滚动并更新多通道缓冲池（真正的 4 通道数据）
+            self.multi_channel_buffer = np.roll(
+                self.multi_channel_buffer, -n_frames, axis=1
+            )
+            self.multi_channel_buffer[:, -n_frames:] = new_data
+            
+            shift = n_frames  # 用于 CSV 的 dt 计算
+        else:
+            # ====== 单通道模式（向后兼容） ======
+            shift = len(new_data)
+            if shift == 0:
+                return
+            
+            # 滚动并更新波形通道
+            self.voltage_data = np.roll(self.voltage_data, -shift)
+            self.voltage_data[-shift:] = new_data
+            
+            # 多通道缓冲池：所有通道填入相同数据（权宜之计）
+            self.multi_channel_buffer = np.roll(
+                self.multi_channel_buffer, -shift, axis=1
+            )
+            self.multi_channel_buffer[:, -shift:] = new_data
         
-        # ---- 同时也更新多通道缓冲池（所有通道同步更新相同数据） ----
-        self.multi_channel_buffer = np.roll(self.multi_channel_buffer, -shift, axis=1)
-        self.multi_channel_buffer[:, -shift:] = new_data  # 4 通道初始相同
-        
-        # ---- 送入 DSP 引擎处理 ----
-        # 【兼容】DSPEngine.process_window 现在返回 6 个值（新增 valid_peaks）
-        processed_signal, threshold_limit, ips, mass_rate, window_energy, valid_peaks = self.dsp.process_window(
-            self.voltage_data, 
-            self.user_threshold, 
-            self.K_v2
+        # ---- 送入 DSP 引擎处理（使用 Ch.1 数据） ----
+        processed_signal, threshold_limit, ips, mass_rate, window_energy, valid_peaks = (
+            self.dsp.process_window(
+                self.voltage_data,
+                self.user_threshold,
+                self.K_v2
+            )
         )
         
         # ---- 标定累加逻辑 ----
@@ -486,13 +548,19 @@ class SignalTracesTab(QWidget):
         # ---- 报警状态机判定 ----
         if mass_rate >= self.alarm_limit:
             self.alarm_indicator.setText("CRITICAL ALARM")
-            self.alarm_indicator.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; border-radius: 5px;")
+            self.alarm_indicator.setStyleSheet(
+                "background-color: #dc3545; color: white; font-weight: bold; border-radius: 5px;"
+            )
         elif mass_rate >= self.caution_limit:
             self.alarm_indicator.setText("CAUTION")
-            self.alarm_indicator.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold; border-radius: 5px;")
+            self.alarm_indicator.setStyleSheet(
+                "background-color: #ffc107; color: black; font-weight: bold; border-radius: 5px;"
+            )
         else:
             self.alarm_indicator.setText("NORMAL")
-            self.alarm_indicator.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; border-radius: 5px;")
+            self.alarm_indicator.setStyleSheet(
+                "background-color: #28a745; color: white; font-weight: bold; border-radius: 5px;"
+            )
         
         # ====== CSV 工业报表数据持久化 ======
         if self.is_recording and self.csv_writer is not None:
@@ -514,27 +582,75 @@ class SignalTracesTab(QWidget):
                 f"{self.total_mass_recorded:.4f}"
             ])
         
-        # ====== 【核心新增】TDOA 切窗打地鼠触发 ======
+        # ====== 【第一道防线】TDOA 切窗打地鼠（含限流抽帧） ======
         if self.cb_tdoa.isChecked() and ips > 0 and valid_peaks:
-            # 取最近一次有效峰值（窗口末尾的最新撞击）
-            last_peak = valid_peaks[-1]
-            
-            # 使用峰值生成模拟 4 通道阵列数据切片
-            X_slice = self._generate_mock_multi_ch_slice(last_peak)
-            
-            if X_slice is not None:
-                # 异步投入 TDOA 工作线程
-                self.tdoa_worker.enqueue(X_slice)
+            # ---- 限流抽帧：确保两次派发间隔不低于阈值 ----
+            now = time.time()
+            if now - self.last_tdoa_time < self.TDOA_MIN_INTERVAL:
+                # 跳过本次定位计算，但 DSPEngine 的全量计算不受影响
+                pass
+            else:
+                # 取最近一次有效峰值（窗口末尾的最新撞击）
+                last_peak = valid_peaks[-1]
                 
-                # 如果队列积压过多，丢弃旧任务以保持实时性
-                if self.tdoa_worker.pending_tasks > 5:
-                    self.tdoa_worker.clear_queue()
-                    self.tdoa_status_label.setText("TDOA: 清空积压队列")
+                # ====== 从多通道缓冲池截取真实 4 通道切片 ======
+                X_slice = self._extract_multi_ch_slice(last_peak)
+                
+                if X_slice is not None:
+                    # 更新派发时间戳（限流门槛）
+                    self.last_tdoa_time = now
+                    
+                    # 异步投入 TDOA 工作线程
+                    self.tdoa_worker.enqueue(X_slice)
+                    
+                    # 如果队列积压过多，丢弃旧任务以保持实时性
+                    if self.tdoa_worker.pending_tasks > self.TDOA_QUEUE_WARN_THRESHOLD:
+                        self.tdoa_worker.clear_queue()
+                        self.tdoa_status_label.setText("TDOA: 清空积压队列")
+
         
         # ---- 绘图更新 ----
         self.raw_curve.setData(self.voltage_data)
         self.avg_curve.setData(processed_signal)
         self.th_curve.setData(np.full(self.data_len, threshold_limit))
+
+    # ================================================================
+    #  从多通道缓冲池截取 4 通道切片（真实的"切窗打地鼠"）
+    # ================================================================
+    def _extract_multi_ch_slice(self, peak_idx_in_window: int) -> np.ndarray:
+        """
+        从 multi_channel_buffer 中以峰值位置为中心，截取极短的 4 通道切片。
+        这是"切窗打地鼠"策略的核心——从连续的环形缓冲池中切出干净的事件片段。
+        
+        采用「向左平移对齐」策略：峰后最多取 1000 点（不超右边界），
+        不足部分从前方补齐，保证切片长度绝对等于 2000。
+        
+        参数
+        ----------
+        peak_idx_in_window : int
+            峰值在 self.voltage_data 窗口中的索引位置。
+        
+        返回
+        -------
+        X_slice : np.ndarray, shape (4, n_slice)
+            多通道数据切片。若切片无效则返回 None。
+        """
+        n_slice = 2000     # 总长度 2000 点
+        buf_len = self.MULTI_CH_BUF_LEN  # 3000
+        
+        # 尝试向未来取 1000 点，但不允许超过右边界
+        end = min(peak_idx_in_window + 1000, buf_len)
+        # 强制向左回退 n_slice，保证切片长度绝对等于 2000
+        start = end - n_slice
+        
+        # 只有在软件刚启动，总数据量都不足 2000 时才放弃
+        if start < 0:
+            return None
+        
+        # 截取 4 通道切片
+        X_slice = self.multi_channel_buffer[:, start:end].copy()
+        
+        return X_slice
 
     # ==================== CSV 录制控制 ====================
     def toggle_csv_recording(self):

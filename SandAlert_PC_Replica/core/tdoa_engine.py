@@ -229,47 +229,73 @@ class TDOAEngine:
         return tau_theory
 
     # ============================================================
-    #  网格搜索 DOA 估计
+    #  分级网格搜索 DOA 估计 (Coarse-to-Fine, 高性能版)
     # ============================================================
     def grid_search_doa(
         self,
         tdoa_obs: np.ndarray,
+        coarse_step: float = 2.0,
+        fine_step: float = 0.5,
+        fine_window: float = 2.5,
     ) -> tuple[float, np.ndarray, np.ndarray]:
         """
-        网格搜索方位角估计。
+        粗细分级网格搜索方位角估计（Coarse-to-Fine）。
 
-        对 0°~360° 每个候选角度 θ：
-        1. 计算理论时延向量 τ_theory(θ)
-        2. 代价函数 J(θ) = ||τ_obs - τ_theory(θ)||²
-        3. 使 J(θ) 最小的 θ 即为估计角度
+        Level 1 — 极速粗扫：coarse_step 步长在 0~360° 盲扫，定位粗略角度。
+        Level 2 — 精准细扫：在粗略角度 ±fine_window 范围内以 fine_step 精扫。
+
+        效果：循环次数从 720 (0.5°) 降至 < 200，吞吐率提升 3.6x。
 
         参数
         ----------
         tdoa_obs : np.ndarray, shape (m-1,)
             观测到的相对时延向量（GCC-PHAT 估计）。
+        coarse_step : float
+            粗扫步长（度），默认 2.0°。
+        fine_step : float
+            精扫步长（度），默认 0.5°。
+        fine_window : float
+            精扫窗口半径（度），默认 2.5°。
 
         返回
         -------
         est_angle_deg : float
             估计的方位角（度）。
-        angles_deg : np.ndarray
-            扫描角度网格。
-        cost_values : np.ndarray
-            每个角度的代价函数值 J(θ)。
+        angles_all : np.ndarray
+            合并后的完整扫描角度网格（粗扫 + 细扫）。
+        cost_all : np.ndarray
+            合并后的所有角度代价值。
         """
-        angles_deg = np.arange(0, 360, self.angle_step)
-        N = len(angles_deg)
-        cost_values = np.zeros(N)
+        # ---- Level 1: 极速粗扫 ----
+        angles_coarse = np.arange(0, 360, coarse_step)
+        costs_coarse = np.zeros(len(angles_coarse))
 
-        for i, theta in enumerate(angles_deg):
+        for i, theta in enumerate(angles_coarse):
             tau_theory = self.compute_theoretical_tdoa(theta)
-            cost_values[i] = np.sum((tdoa_obs - tau_theory) ** 2)
+            costs_coarse[i] = np.sum((tdoa_obs - tau_theory) ** 2)
 
-        # 代价最小化 → 最佳估计
-        best_idx = np.argmin(cost_values)
-        est_angle_deg = angles_deg[best_idx]
+        best_coarse_idx = np.argmin(costs_coarse)
+        theta_rough = angles_coarse[best_coarse_idx]
 
-        return est_angle_deg, angles_deg, cost_values
+        # ---- Level 2: 精准细扫 ----
+        angles_fine = np.arange(theta_rough - fine_window, 
+                                theta_rough + fine_window + fine_step * 0.5, 
+                                fine_step) % 360.0
+        costs_fine = np.zeros(len(angles_fine))
+
+        for i, theta in enumerate(angles_fine):
+            tau_theory = self.compute_theoretical_tdoa(theta)
+            costs_fine[i] = np.sum((tdoa_obs - tau_theory) ** 2)
+
+        best_fine_idx = np.argmin(costs_fine)
+        est_angle_deg = angles_fine[best_fine_idx]
+
+        # 合并结果
+        angles_all = np.concatenate([angles_coarse, angles_fine])
+        cost_all = np.concatenate([costs_coarse, costs_fine])
+
+        return est_angle_deg, angles_all, cost_all
+
 
     # ============================================================
     #  一站式 DOA 估计（推荐入口）
