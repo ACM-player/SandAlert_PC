@@ -584,29 +584,29 @@ class SignalTracesTab(QWidget):
         
         # ====== 【第一道防线】TDOA 切窗打地鼠（含限流抽帧） ======
         if self.cb_tdoa.isChecked() and ips > 0 and valid_peaks:
-            # ---- 限流抽帧：确保两次派发间隔不低于阈值 ----
-            now = time.time()
-            if now - self.last_tdoa_time < self.TDOA_MIN_INTERVAL:
-                # 跳过本次定位计算，但 DSPEngine 的全量计算不受影响
-                pass
-            else:
-                # 取最近一次有效峰值（窗口末尾的最新撞击）
-                last_peak = valid_peaks[-1]
-                
-                # ====== 从多通道缓冲池截取真实 4 通道切片 ======
-                X_slice = self._extract_multi_ch_slice(last_peak)
-                
-                if X_slice is not None:
-                    # 更新派发时间戳（限流门槛）
-                    self.last_tdoa_time = now
+            
+            # ⚠️ 核心物理时序修正：只抓取"成熟"的峰值！
+            # 峰值刚进入视窗最右侧时，未来（延迟通道）的数据还未到达串口。
+            # 必须等峰值向左移动至少 1000 个点（留足 0.5ms 的后置接收时间），才能一刀切下完整的多通道数据！
+            mature_peaks = [p for p in valid_peaks if p < self.MULTI_CH_BUF_LEN - 1000]
+            
+            if mature_peaks:
+                now = time.time()
+                # 限流抽帧：确保两次派发间隔不低于阈值
+                if now - self.last_tdoa_time >= self.TDOA_MIN_INTERVAL:
+                    # 取最近的一个"成熟"峰值
+                    target_peak = mature_peaks[-1]
                     
-                    # 异步投入 TDOA 工作线程
-                    self.tdoa_worker.enqueue(X_slice)
+                    # ====== 从多通道缓冲池截取完整的 4 通道切片 ======
+                    X_slice = self._extract_multi_ch_slice(target_peak)
                     
-                    # 如果队列积压过多，丢弃旧任务以保持实时性
-                    if self.tdoa_worker.pending_tasks > self.TDOA_QUEUE_WARN_THRESHOLD:
-                        self.tdoa_worker.clear_queue()
-                        self.tdoa_status_label.setText("TDOA: 清空积压队列")
+                    if X_slice is not None:
+                        self.last_tdoa_time = now
+                        self.tdoa_worker.enqueue(X_slice)
+                        
+                        if self.tdoa_worker.pending_tasks > self.TDOA_QUEUE_WARN_THRESHOLD:
+                            self.tdoa_worker.clear_queue()
+                            self.tdoa_status_label.setText("TDOA: 清空积压队列")
 
         
         # ---- 绘图更新 ----

@@ -129,16 +129,14 @@ def _engine_tdoa_array(master_fd: int):
     print("\n📡 开始生成 4 通道阵列信号（压缩时间块状版）...")
     print("   按 Ctrl+C 可安全停止模拟器。\n")
 
-    # ---- 初始化 TDOA 引擎获取几何参数 ----
+    # ---- 初始化 TDOA 引擎 ----
     engine = TDOAEngine(fs=2_000_000, radius=0.05, c=1500.0)
     fs = engine.fs
-    sensor_pos = engine.sensor_pos  # shape (4, 2)
 
     # ---- 物理参数 ----
     NOISE_STD = 0.002                 # 白噪声标准差（伏特）
-    PULSE_AMPLITUDE = 1.2             # 脉冲幅度（保证峰值 ≈ 1.0 V）
     NOISE_BLOCK_LEN = 500             # Step A：底噪块长度
-    IMPACT_BLOCK_LEN = 1500           # Step B：撞击块长度
+    IMPACT_BLOCK_LEN = 3500           # Step B：撞击块长度
     SEND_DELAY = 0.01                 # 每块发送后的延迟（秒）
 
     try:
@@ -162,46 +160,36 @@ def _engine_tdoa_array(master_fd: int):
             # ============================================================
             #  Step B：生成并发送一个高能撞击事件
             # ============================================================
-            # 1) 随机方位角
-            #current_angle = random.uniform(0, 360)
-            current_angle = 134.0 # 🎯 强制定角测试！改成 45 度！
-            theta_rad = np.deg2rad(current_angle)
-            source_dir = np.array([np.cos(theta_rad), np.sin(theta_rad)])
-
-            # 2) 物理时延 tau_i = -p_i·u / c
-            delays_true = -(sensor_pos @ source_dir) / 1500.0  # c = 1500 m/s
+            # 🎯 强制定角测试（验证算法准确性）
+            current_angle = 45.0  
+            
+            # 1) 直接调用 TDOAEngine 里面物理极其完美的阵列生成器！
+            # 产生自带高斯包络的宽带 Chirp 脉冲
+            impact_block_t, delays_true = engine.generate_mock_array_data(
+                n_samples=IMPACT_BLOCK_LEN,
+                true_angle_deg=current_angle,
+                snr_db=10.0
+            )
+            
+            # 引擎返回的是 (4, N) 形状，为了模拟串口逐行发送，我们需要转置成 (N, 4)
+            impact_block = impact_block_t.T
             delays_samples = np.round(delays_true * fs).astype(int)
 
-            # 3) 构建高频 Chirp 突刺（200 kHz 正弦，无额外包络 = 尖锐突刺）
-            t_axis = np.arange(IMPACT_BLOCK_LEN) / fs
-            chirp_waveform = PULSE_AMPLITUDE * np.sin(
-                2 * np.pi * 200e3 * t_axis
-            )
-
-            # 4) 构建 4 通道撞击块（底噪 + 带时延的 Chirp）
-            impact_block = (
-                np.random.randn(IMPACT_BLOCK_LEN, 4).astype(np.float32) * NOISE_STD
-            )
-            for ch_idx in range(4):
-                delay = delays_samples[ch_idx]
-                for i in range(IMPACT_BLOCK_LEN):
-                    src_idx = i - delay
-                    if 0 <= src_idx < IMPACT_BLOCK_LEN:
-                        impact_block[i, ch_idx] += chirp_waveform[src_idx]
-
-            # 5) 逐行发送撞击数据
+            # 2) 逐行发送撞击数据
             lines_b = []
             for row in impact_block:
+                # 稍微放大一点幅值，确保能刺穿上位机的触发阈值
                 lines_b.append(
-                    f"{row[0]:.6f},{row[1]:.6f},{row[2]:.6f},{row[3]:.6f}\n"
+                    f"{row[0]*1.5:.6f},{row[1]*1.5:.6f},{row[2]*1.5:.6f},{row[3]*1.5:.6f}\n"
                 )
             for line in lines_b:
                 os.write(master_fd, line.encode('utf-8'))
+                
             sample_idx += IMPACT_BLOCK_LEN
             block_count += 1
 
             # ---- 打印撞击报告 ----
-            peak_val = float(np.max(np.abs(impact_block)))
+            peak_val = float(np.max(np.abs(impact_block)) * 1.5)
             print(f"💥 [{block_count}] 角度: {current_angle:.1f}°  "
                   f"| 时延: {list(delays_samples)} samples  "
                   f"| 峰值: {peak_val:.3f}V  "
