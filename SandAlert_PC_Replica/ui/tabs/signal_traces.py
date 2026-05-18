@@ -222,7 +222,7 @@ class SignalTracesTab(QWidget):
         
         # ====== TDOA 限流抽帧（Rate Limiter） ======
         self.last_tdoa_time = 0.0           # 上次 TDOA 派发时间戳
-        self.TDOA_MIN_INTERVAL = 0.5        # 触发抑制（秒）：一个物理脉冲只做一次最高质量切窗
+        self.TDOA_MIN_INTERVAL = 0.05        # 触发抑制（秒）：一个物理脉冲只做一次最高质量切窗
         self.TDOA_QUEUE_WARN_THRESHOLD = 5  # 队列积压超过此值则清空
 
         # ====== TDOA 异步工作线程 ======
@@ -583,22 +583,21 @@ class SignalTracesTab(QWidget):
             ])
         
         # ====== 【第一道防线】TDOA 切窗打地鼠（含限流抽帧） ======
-        if self.cb_tdoa.isChecked() and ips > 0 and valid_peaks:
+        if self.cb_tdoa.isChecked() and ips > 0:
             
-            # ⚠️ 核心物理时序修正：只抓取"成熟"的峰值！
-            # 峰值刚进入视窗最右侧时，未来（延迟通道）的数据还未到达串口。
-            # 必须等峰值向左移动至少 1000 个点（留足 0.5ms 的后置接收时间），才能一刀切下完整的多通道数据！
-            mature_peaks = [p for p in valid_peaks if p < self.MULTI_CH_BUF_LEN - 1000]
+            # 🎯 终极物理修复：全局能量重心准星 (Global Maximum Crosshair)
+            # 抛弃微观的 valid_peaks，寻找当前整个屏幕上能量最大的绝对重心
+            global_max_idx = int(np.argmax(np.abs(self.voltage_data)))
             
-            if mature_peaks:
+            # 只有当这个"绝对重心"刚好滑入屏幕正中央极窄的准星时，才扣动扳机
+            if 1450 <= global_max_idx <= 1550:
                 now = time.time()
-                # 限流抽帧：确保两次派发间隔不低于阈值
-                if now - self.last_tdoa_time >= self.TDOA_MIN_INTERVAL:
-                    # 取最近的一个"成熟"峰值
-                    target_peak = mature_peaks[-1]
+                
+                # 极短冷却（0.1s），仅用于防止重心点在准星内停留的 2~3 帧重复触发
+                if now - self.last_tdoa_time >= 0.1:
                     
-                    # ====== 从多通道缓冲池截取完整的 4 通道切片 ======
-                    X_slice = self._extract_multi_ch_slice(target_peak)
+                    # ====== 截取以能量重心为绝对中心的 4 通道切片 ======
+                    X_slice = self._extract_multi_ch_slice(global_max_idx)
                     
                     if X_slice is not None:
                         self.last_tdoa_time = now
