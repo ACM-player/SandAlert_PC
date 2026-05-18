@@ -222,7 +222,7 @@ class SignalTracesTab(QWidget):
         
         # ====== TDOA 限流抽帧（Rate Limiter） ======
         self.last_tdoa_time = 0.0           # 上次 TDOA 派发时间戳
-        self.TDOA_MIN_INTERVAL = 0.1        # 最小派发间隔（秒）≈ 每秒最多 10 次
+        self.TDOA_MIN_INTERVAL = 0.5        # 触发抑制（秒）：一个物理脉冲只做一次最高质量切窗
         self.TDOA_QUEUE_WARN_THRESHOLD = 5  # 队列积压超过此值则清空
 
         # ====== TDOA 异步工作线程 ======
