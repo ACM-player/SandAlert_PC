@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import QTimer, Qt, QRectF
 from PySide6.QtGui import QPen
 import csv               # 用于 CSV 文件写入（工业报表数据持久化）
+import traceback         # 用于 UI 槽函数内的异常打印诊断
+
 from datetime import datetime  # 用于生成时间戳和默认文件名
 from core.dsp_engine import DSPEngine
 from core.tdoa_worker import TDOAWorker
@@ -101,10 +103,11 @@ class SignalTracesTab(QWidget):
         # ---- 右侧：极坐标雷达图（TDOA方位角显示） ----
         self.polar_widget = pg.PlotWidget()
         self.polar_widget.setBackground('w')
-        self.polar_widget.setLabel('left', '')
-        self.polar_widget.setLabel('bottom', '')
+        # 彻底隐藏无关的直角坐标轴，解决 UI 拥挤问题
+        self.polar_widget.hideAxis('left')
+        self.polar_widget.hideAxis('bottom')
         self.polar_widget.setTitle('TDOA-AE Azimuth (Polar)')
-        # 锁定等比例，范围 [-1.2, 1.2] 以显示完整极坐标
+        # 锁定等比例，范围 [-1.3, 1.3] 给文字留出呼吸空间
         self.polar_widget.setAspectLocked(lock=True, ratio=1.0)
         self.polar_widget.setRange(xRange=[-1.3, 1.3], yRange=[-1.3, 1.3])
         self.polar_widget.hideButtons()
@@ -242,47 +245,42 @@ class SignalTracesTab(QWidget):
     #  极坐标网格绘制
     # ================================================================
     def _draw_polar_grid(self):
-        """绘制极坐标雷达图的背景网格（同心圆 + 径向线）。"""
-        # 同心圆
-        for r in [0.25, 0.5, 0.75, 1.0]:
-            circle = pg.QtWidgets.QGraphicsEllipseItem(
-                QRectF(-r, -r, 2 * r, 2 * r)
-            )
-            circle.setPen(pg.mkPen(200, 200, 200, width=1, style=Qt.DashLine))
-            circle.setZValue(-10)
+        """绘制清爽版的极坐标背景网格与标签"""
+        # 画同心圆 (r=0.5, r=1.0)
+        for r in [0.5, 1.0]:
+            circle = pg.QtWidgets.QGraphicsEllipseItem(-r, -r, r * 2, r * 2)
+            circle.setPen(pg.mkPen('gray', width=1, style=Qt.DashLine))
             self.polar_widget.addItem(circle)
+            
+        # 统一的标签半径（推到外侧 1.25，留出呼吸空间）
+        label_r = 1.25 
         
-        # 径向线（每 30° 一条）
-        for angle_deg in range(0, 360, 30):
-            angle_rad = np.deg2rad(angle_deg)
-            x = np.cos(angle_rad)
-            y = np.sin(angle_rad)
-            line = pg.PlotDataItem(
-                [0, x], [0, y],
-                pen=pg.mkPen(200, 200, 200, width=1, style=Qt.DashLine)
-            )
-            line.setZValue(-10)
+        # 统一循环画放射线与标签
+        for deg in range(0, 360, 30):
+            rad = np.deg2rad(deg)
+            x = np.cos(rad)
+            y = np.sin(rad)
+            
+            # 画放射线 (只延伸到 r=1.0)
+            line = pg.PlotCurveItem([0, x], [0, y], pen=pg.mkPen('gray', width=1, style=Qt.DashLine))
             self.polar_widget.addItem(line)
             
-            # 方位角标注（在 1.1 倍半径处）
-            label_r = 1.15
-            lx = label_r * np.cos(angle_rad)
-            ly = label_r * np.sin(angle_rad)
-            label = pg.TextItem(
-                text=f"{angle_deg}°",
-                color=(150, 150, 150),
-                anchor=(0.5, 0.5)
-            )
-            label.setPos(lx, ly)
-            self.polar_widget.addItem(label)
-        
-        # 标注四个基本方位（N, E, S, W）
-        directions = [("0° (E)", 1.3, 0), ("90° (N)", 0, 1.3),
-                      ("180° (W)", -1.3, 0), ("270° (S)", 0, -1.3)]
-        for text, x, y in directions:
-            lbl = pg.TextItem(text=text, color=(120, 120, 120), anchor=(0.5, 0.5))
-            lbl.setPos(x, y)
-            self.polar_widget.addItem(lbl)
+            # 整合标签文本（摒弃重复的单独绘制）
+            if deg == 0:
+                text = "0° (E)"
+            elif deg == 90:
+                text = "90° (N)"
+            elif deg == 180:
+                text = "180° (W)"
+            elif deg == 270:
+                text = "270° (S)"
+            else:
+                text = f"{deg}°"
+                
+            # 添加文本标签（统一锚点中心对齐）
+            text_item = pg.TextItem(text, color='gray', anchor=(0.5, 0.5))
+            text_item.setPos(x * label_r, y * label_r)
+            self.polar_widget.addItem(text_item)
 
     # ================================================================
     #  TDOA 开关回调
@@ -461,74 +459,138 @@ class SignalTracesTab(QWidget):
     # ==================== 核心数据更新入口 ====================
     def update_from_serial(self, new_data):
         """
-        接收 QThread 传来的 numpy 数组，支持两种格式（自动适配）：
+        接收 QThread 传来的数据，支持两种类型（自动检测）：
         
-        格式 1 — shape (4, N) : 4 通道阵列数据（TDOA 模式）
-            new_data[0] = Ch.1  → 送入 DSPEngine 维持出砂量折线图
-            new_data[0~3]      → 填充 multi_channel_buffer 供 TDOA 切片
+        类型 A — numpy 数组（来自 SerialReaderThread / FileReplayThread）:
+            波形声学数据，走 DSP 引擎处理
+            支持 shape (4, N) 4通道阵列 或 (N,) 单通道
         
-        格式 2 — shape (N,) : 单通道数据（向后兼容，FileReplay 模式）
-            送入 DSPEngine，同时备份到 multi_channel_buffer 所有通道
+        类型 B — dict（来自 ModbusReaderThread）:
+            已解析的 Modbus 工业参数，直接使用
+            dict 字段: ips, mass_rate, total_mass, relay_status, current_ma
         
-        在此基础上完成：
+        在本函数中统一完成：
           1. 三相分离器效率计算
-          2. CSV 工业报表数据持久化
-          3. TDOA 切窗打地鼠：检测到撞击峰值时，从 multi_channel_buffer 截取
-             4 通道切片送入 TDOAWorker
+          2. 报警状态机判定（正常/警告/严重）
+          3. CSV 工业报表数据持久化
+          4. 实时 UI 更新
         """
-        # ---- 检测数据格式 ----
-        if new_data.ndim == 2 and new_data.shape[0] == 4:
-            # ====== 4 通道阵列数据模式 ======
-            n_frames = new_data.shape[1]
-            if n_frames == 0:
-                return
+        # ================================================================
+        #  类型检测：判断传入的是 dict（Modbus）还是 numpy array（波形）
+        # ================================================================
+        if isinstance(new_data, dict):
+            # ====== Modbus 工业数据模式（直接使用解析后的参数） ======
+            # 用 try/except 包裹整个处理逻辑，防止 PySide 静默吞噬异常
+            try:
+                print(f"[UI] 🧵 收到 Modbus 字典: {new_data}")
+                ips = new_data.get('ips', 0)
+                mass_rate = new_data.get('mass_rate', 0.0)
+                total_mass = new_data.get('total_mass', 0.0)
+                relay_status = new_data.get('relay_status', 0)
+                current_ma = new_data.get('current_ma', 4.0)
+                
+                # Modbus 模式下，波形图维持不动（不更新 DSP），只更新数字参数
+                # 取当前窗口均值作为"平稳基线"，但波形不刷新
+                processed_signal = self.voltage_data  # 保持波形
+                threshold_limit = self.user_threshold
+                
+                # Modbus 没有"窗口能量"概念，跳过标定累加
+                shift = 50  # 给 CSV 一个合理的 dt 基值（0.05s）
+                
+                # ---- 更新状态显示 ----
+                self.impact_label.setText(f"Impact rate = {ips} /s  [Modbus]")
+                self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s  [Modbus]")
+            except Exception as e:
+                print(f"[UI] ❌ Modbus 更新界面时发生崩溃: {e}")
+                traceback.print_exc()
+                return  # 跳过后续共用逻辑，避免级联错误
             
-            # 提取 Ch.1 供 DSP 引擎处理（波形显示 + 出砂量评估）
-            ch1_data = new_data[0]
-            
-            # 滚动并更新波形通道
-            self.voltage_data = np.roll(self.voltage_data, -n_frames)
-            self.voltage_data[-n_frames:] = ch1_data
-            
-            # 滚动并更新多通道缓冲池（真正的 4 通道数据）
-            self.multi_channel_buffer = np.roll(
-                self.multi_channel_buffer, -n_frames, axis=1
-            )
-            self.multi_channel_buffer[:, -n_frames:] = new_data
-            
-            shift = n_frames  # 用于 CSV 的 dt 计算
         else:
-            # ====== 单通道模式（向后兼容） ======
-            shift = len(new_data)
-            if shift == 0:
-                return
+            # ====== 波形声学数据模式（原 DSP 流程） ======
             
-            # 滚动并更新波形通道
-            self.voltage_data = np.roll(self.voltage_data, -shift)
-            self.voltage_data[-shift:] = new_data
+            # ---- 检测数据格式 ----
+            if new_data.ndim == 2 and new_data.shape[0] == 4:
+                # ----- 4 通道阵列数据模式 -----
+                n_frames = new_data.shape[1]
+                if n_frames == 0:
+                    return
+                
+                # 提取 Ch.1 供 DSP 引擎处理
+                ch1_data = new_data[0]
+                
+                # 滚动并更新波形通道
+                self.voltage_data = np.roll(self.voltage_data, -n_frames)
+                self.voltage_data[-n_frames:] = ch1_data
+                
+                # 滚动并更新多通道缓冲池
+                self.multi_channel_buffer = np.roll(
+                    self.multi_channel_buffer, -n_frames, axis=1
+                )
+                self.multi_channel_buffer[:, -n_frames:] = new_data
+                
+                shift = n_frames
+            else:
+                # ----- 单通道模式（向后兼容） -----
+                shift = len(new_data)
+                if shift == 0:
+                    return
+                
+                # 滚动并更新波形通道
+                self.voltage_data = np.roll(self.voltage_data, -shift)
+                self.voltage_data[-shift:] = new_data
+                
+                # 多通道缓冲池：所有通道填入相同数据
+                self.multi_channel_buffer = np.roll(
+                    self.multi_channel_buffer, -shift, axis=1
+                )
+                self.multi_channel_buffer[:, -shift:] = new_data
             
-            # 多通道缓冲池：所有通道填入相同数据（权宜之计）
-            self.multi_channel_buffer = np.roll(
-                self.multi_channel_buffer, -shift, axis=1
+            # ---- 送入 DSP 引擎处理（使用 Ch.1 数据） ----
+            processed_signal, threshold_limit, ips, mass_rate, window_energy, valid_peaks = (
+                self.dsp.process_window(
+                    self.voltage_data,
+                    self.user_threshold,
+                    self.K_v2
+                )
             )
-            self.multi_channel_buffer[:, -shift:] = new_data
+            
+            # ---- 标定累加逻辑 ----
+            if getattr(self, 'is_calibrating', False):
+                self.accumulated_energy += window_energy
+            
+            # ---- 更新 UI 数字 ----
+            self.impact_label.setText(f"Impact rate = {ips} /s")
+            self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s")
+            
+            # Modbus 模式下无电流数据时使用模拟值
+            current_ma = 4.0 + (mass_rate * 0.1)
+            relay_status = None
+            
+            # ====== 【Modbus 模式跳过】TDOA 切窗打地鼠（波形模式下执行） ======
+            if self.cb_tdoa.isChecked() and ips > 0:
+                # 全局能量重心准星
+                global_max_idx = int(np.argmax(np.abs(self.voltage_data)))
+                
+                if 1450 <= global_max_idx <= 1550:
+                    now = time.time()
+                    if now - self.last_tdoa_time >= 0.1:
+                        X_slice = self._extract_multi_ch_slice(global_max_idx)
+                        if X_slice is not None:
+                            self.last_tdoa_time = now
+                            self.tdoa_worker.enqueue(X_slice)
+                            
+                            if self.tdoa_worker.pending_tasks > self.TDOA_QUEUE_WARN_THRESHOLD:
+                                self.tdoa_worker.clear_queue()
+                                self.tdoa_status_label.setText("TDOA: 清空积压队列")
+            
+            # ---- 波形模式绘图更新 ----
+            self.raw_curve.setData(self.voltage_data)
+            self.avg_curve.setData(processed_signal)
+            self.th_curve.setData(np.full(self.data_len, threshold_limit))
         
-        # ---- 送入 DSP 引擎处理（使用 Ch.1 数据） ----
-        processed_signal, threshold_limit, ips, mass_rate, window_energy, valid_peaks = (
-            self.dsp.process_window(
-                self.voltage_data,
-                self.user_threshold,
-                self.K_v2
-            )
-        )
-        
-        # ---- 标定累加逻辑 ----
-        if getattr(self, 'is_calibrating', False):
-            self.accumulated_energy += window_energy
-        
-        # ---- 更新 UI 数字 ----
-        self.impact_label.setText(f"Impact rate = {ips} /s")
-        self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s")
+        # ================================================================
+        #  以下为两种模式共用的逻辑（效率计算、报警判定、CSV 持久化）
+        # ================================================================
         
         # ====== 三相分离器效率计算 ======
         try:
@@ -545,22 +607,41 @@ class SignalTracesTab(QWidget):
         self.efficiency_bar.setValue(int(round(efficiency)))
         self.efficiency_bar.setFormat(f"Efficiency: {efficiency:.4f}%")
         
-        # ---- 报警状态机判定 ----
-        if mass_rate >= self.alarm_limit:
-            self.alarm_indicator.setText("CRITICAL ALARM")
-            self.alarm_indicator.setStyleSheet(
-                "background-color: #dc3545; color: white; font-weight: bold; border-radius: 5px;"
-            )
-        elif mass_rate >= self.caution_limit:
-            self.alarm_indicator.setText("CAUTION")
-            self.alarm_indicator.setStyleSheet(
-                "background-color: #ffc107; color: black; font-weight: bold; border-radius: 5px;"
-            )
+        # ====== 报警状态机判定（使用 Modbus relay_status 或 mass_rate 阈值） ======
+        if isinstance(new_data, dict) and relay_status is not None:
+            # Modbus 模式：基于仪表原生的继电器状态判定
+            if relay_status & 0x02:  # bit1 = Alarm
+                self.alarm_indicator.setText("CRITICAL ALARM")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #dc3545; color: white; font-weight: bold; border-radius: 5px;"
+                )
+            elif relay_status & 0x01:  # bit0 = Caution
+                self.alarm_indicator.setText("CAUTION")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #ffc107; color: black; font-weight: bold; border-radius: 5px;"
+                )
+            else:
+                self.alarm_indicator.setText("NORMAL")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; border-radius: 5px;"
+                )
         else:
-            self.alarm_indicator.setText("NORMAL")
-            self.alarm_indicator.setStyleSheet(
-                "background-color: #28a745; color: white; font-weight: bold; border-radius: 5px;"
-            )
+            # 波形模式：基于 DSP 计算的 mass_rate 阈值判定
+            if mass_rate >= self.alarm_limit:
+                self.alarm_indicator.setText("CRITICAL ALARM")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #dc3545; color: white; font-weight: bold; border-radius: 5px;"
+                )
+            elif mass_rate >= self.caution_limit:
+                self.alarm_indicator.setText("CAUTION")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #ffc107; color: black; font-weight: bold; border-radius: 5px;"
+                )
+            else:
+                self.alarm_indicator.setText("NORMAL")
+                self.alarm_indicator.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; border-radius: 5px;"
+                )
         
         # ====== CSV 工业报表数据持久化 ======
         if self.is_recording and self.csv_writer is not None:
@@ -568,50 +649,25 @@ class SignalTracesTab(QWidget):
             step_mass = mass_rate * dt
             self.total_mass_recorded += step_mass
             
-            mock_current_ma = 4.0 + (mass_rate * 0.1)
-            
             now = datetime.now()
             timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            
+            # 提取最新的 TDOA 角度（若未开启或无数据则填 N/A）
+            if self.cb_tdoa.isChecked() and self.tdoa_last_angle is not None:
+                tdoa_val = f"{self.tdoa_last_angle:.1f}"
+            else:
+                tdoa_val = "N/A"
             
             self.csv_writer.writerow([
                 timestamp_str,
                 ips,
                 f"{mass_rate:.5f}",
                 f"{efficiency:.2f}",
-                f"{mock_current_ma:.2f}",
-                f"{self.total_mass_recorded:.4f}"
+                f"{current_ma:.2f}",
+                f"{self.total_mass_recorded:.4f}",
+                tdoa_val
             ])
-        
-        # ====== 【第一道防线】TDOA 切窗打地鼠（含限流抽帧） ======
-        if self.cb_tdoa.isChecked() and ips > 0:
-            
-            # 🎯 终极物理修复：全局能量重心准星 (Global Maximum Crosshair)
-            # 抛弃微观的 valid_peaks，寻找当前整个屏幕上能量最大的绝对重心
-            global_max_idx = int(np.argmax(np.abs(self.voltage_data)))
-            
-            # 只有当这个"绝对重心"刚好滑入屏幕正中央极窄的准星时，才扣动扳机
-            if 1450 <= global_max_idx <= 1550:
-                now = time.time()
-                
-                # 极短冷却（0.1s），仅用于防止重心点在准星内停留的 2~3 帧重复触发
-                if now - self.last_tdoa_time >= 0.1:
-                    
-                    # ====== 截取以能量重心为绝对中心的 4 通道切片 ======
-                    X_slice = self._extract_multi_ch_slice(global_max_idx)
-                    
-                    if X_slice is not None:
-                        self.last_tdoa_time = now
-                        self.tdoa_worker.enqueue(X_slice)
-                        
-                        if self.tdoa_worker.pending_tasks > self.TDOA_QUEUE_WARN_THRESHOLD:
-                            self.tdoa_worker.clear_queue()
-                            self.tdoa_status_label.setText("TDOA: 清空积压队列")
 
-        
-        # ---- 绘图更新 ----
-        self.raw_curve.setData(self.voltage_data)
-        self.avg_curve.setData(processed_signal)
-        self.th_curve.setData(np.full(self.data_len, threshold_limit))
 
     # ================================================================
     #  从多通道缓冲池截取 4 通道切片（真实的"切窗打地鼠"）
@@ -683,7 +739,8 @@ class SignalTracesTab(QWidget):
                     "MassRate(g/s)",
                     "Efficiency(%)",
                     "Current(mA)",
-                    "CumulativeMass(g)"
+                    "CumulativeMass(g)",
+                    "TDOA_Angle(deg)"  # 新增定位角度列
                 ])
                 
                 self.is_recording = True

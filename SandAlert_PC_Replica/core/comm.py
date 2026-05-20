@@ -3,12 +3,13 @@
 # =============================================================================
 # 说明：本文件负责数据采集与通信。
 #
-# 包含两个线程类：
-#   1. SerialReaderThread  — 从真实串口（或虚拟串口）读取数据
-#   2. FileReplayThread    — 从本地 .txt 文件回放数据（无硬件时的替代方案）
+# 包含三个线程类：
+#   1. SerialReaderThread     — 从真实串口（或虚拟串口）读取声学波形数据
+#   2. FileReplayThread       — 从本地 .txt 文件回放数据（无硬件时的替代方案）
+#   3. ModbusReaderThread     — 通过 Modbus RTU/TCP 协议读取 SandAlert 仪表全量参数
 #
-# 两个线程的 data_received 信号格式完全一致（发射 numpy 数组），
-# 因此 UI 层无需关心数据来源，只需绑定 update_from_serial 槽函数即可。
+# 前两个线程发射 numpy 数组（波形数据），第三个线程发射 dict（解析后的工业参数）。
+# UI 层的 update_from_serial 通过 isinstance 判断数据类型并分别处理。
 # =============================================================================
 
 import numpy as np
@@ -16,6 +17,7 @@ from PySide6.QtCore import QThread, Signal
 import time
 import glob
 import os
+
 
 # =============================================================================
 # SerialReaderThread：真实/虚拟串口数据读取线程
@@ -299,3 +301,244 @@ class FileReplayThread(QThread):
     def stop(self):
         self._is_running = False
         self.wait()
+
+
+# =============================================================================
+# ModbusReaderThread：Modbus RTU/TCP 数据读取线程
+# =============================================================================
+class ModbusReaderThread(QThread):
+    """
+    Modbus 数据读取线程：通过 pymodbus 协议批量读取 SandAlert 仪表全量参数。
+    
+    支持两种模式：
+      - RTU 模式：通过串口连接真实物理仪表（现场部署）
+      - TCP 模式：连接本地 Mock 服务器（测试联调）
+    
+    通信参数：
+      - 波特率: 19200
+      - 字节大小: 8，停止位: 1，校验位: 'E' (偶校验)
+      - 从机地址 (Slave ID): 126
+    
+    读取逻辑：
+      - 发送 client.read_input_registers(address=0, count=11, slave=126)
+      - 从 result.registers（长度 11）中按索引解包
+      - 通过 data_received 发射 dict 给 UI 线程
+    
+    dict 格式:
+        {
+            'ips': int,            # 瞬时砂击率
+            'mass_rate': float,    # 平均质量/秒 (g/s)
+            'total_mass': float,   # 累计总砂量 (g)
+            'relay_status': int,   # 警报位映射
+            'current_ma': float,   # 模拟电流 (mA)
+            'raw_registers': list  # 原始 11 个寄存器值 (调试用)
+        }
+    """
+    data_received = Signal(object)  # 发射 dict，而非 numpy 数组
+    status_msg = Signal(str)
+
+    # ---- Modbus RTU 串口参数 ----
+    MODBUS_BAUDRATE = 19200
+    MODBUS_BYTESIZE = 8
+    MODBUS_STOPBITS = 1
+    MODBUS_PARITY = 'E'       # 偶校验 (Even)
+    MODBUS_SLAVE_ID = 126
+
+    # ---- 读取参数 ----
+    READ_ADDRESS = 0
+    READ_COUNT = 11
+    POLL_INTERVAL = 0.5  # 轮询间隔（秒）
+
+    def __init__(self, port_or_host, use_tcp=False, tcp_port=5020, parent=None):
+        """
+        初始化 Modbus 读取线程。
+        
+        参数:
+            port_or_host: RTU 模式=串口路径(e.g. /dev/tty.usbserial-1410)；
+                          TCP 模式=主机地址(e.g. 127.0.0.1)
+            use_tcp: True=TCP 模式（本地测试）, False=RTU 模式（真实硬件）
+            tcp_port: TCP 端口号（仅 TCP 模式），默认 5020
+            parent: QObject 父对象
+        """
+        super().__init__(parent)
+        self.port_or_host = port_or_host
+        self.use_tcp = use_tcp
+        self.tcp_port = tcp_port
+        self.client = None
+        self._is_running = False
+
+    def run(self):
+        """
+        线程核心运行逻辑。
+        
+        流程：
+        1. 根据模式创建 ModbusSerialClient（RTU 或 TCP）
+        2. 尝试连接
+        3. 循环轮询：批量读 Input Registers → 解包 → emit
+        4. 所有异常都被 try...except 捕获，绝不崩溃 UI
+        """
+        try:
+            if self.use_tcp:
+                # ====== TCP 模式（本地调试） ======
+                # ModbusTcpClient：纯 TCP 连接，无需任何串口参数
+                from pymodbus.client import ModbusTcpClient
+
+                self.client = ModbusTcpClient(
+                    host=self.port_or_host,
+                    port=self.tcp_port,
+                    timeout=3.0,
+                )
+
+                self.status_msg.emit(
+                    f"🔌 Modbus TCP 连接中: {self.port_or_host}:{self.tcp_port} ..."
+                )
+            else:
+                # ====== RTU 模式（真实仪表） ======
+                from pymodbus.client import ModbusSerialClient
+
+                self.client = ModbusSerialClient(
+                    port=self.port_or_host,
+                    baudrate=self.MODBUS_BAUDRATE,
+                    bytesize=self.MODBUS_BYTESIZE,
+                    stopbits=self.MODBUS_STOPBITS,
+                    parity=self.MODBUS_PARITY,
+                    timeout=2.0,
+                )
+                self.status_msg.emit(
+                    f"🔌 Modbus RTU 连接中: {self.port_or_host} @ {self.MODBUS_BAUDRATE} bps ..."
+                )
+
+
+            # ---- 尝试连接 ----
+            connected = self.client.connect()
+            if not connected:
+                self.status_msg.emit(
+                    f"❌ Modbus 连接失败: {self.port_or_host}"
+                )
+                return
+
+            self._is_running = True
+            self.status_msg.emit(
+                f"✅ Modbus {'TCP' if self.use_tcp else 'RTU'} 已连接 | "
+                f"Slave ID={self.MODBUS_SLAVE_ID} | 轮询间隔={self.POLL_INTERVAL}s"
+            )
+
+        except Exception as e:
+            self.status_msg.emit(f"❌ Modbus 初始化错误: {str(e)}")
+            return
+
+        # ========== 主轮询循环 ==========
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # 连续 5 次失败后自动断开
+
+        while self._is_running:
+            try:
+                # ---- 批量连读 11 个 Input Registers ----
+                # 地址从 0 开始，读取 11 个，从机 ID=126
+                result = self.client.read_input_registers(
+                    address=self.READ_ADDRESS,
+                    count=self.READ_COUNT,
+                    slave=self.MODBUS_SLAVE_ID,
+                )
+
+                # ---- 检查读取是否成功 ----
+                if result is None or hasattr(result, 'isError') and result.isError():
+                    consecutive_errors += 1
+                    self.status_msg.emit(
+                        f"⚠️ Modbus 读取失败 (第 {consecutive_errors} 次) | "
+                        f"错误: {result}"
+                    )
+                    if consecutive_errors >= max_consecutive_errors:
+                        self.status_msg.emit(
+                            "❌ Modbus 连续多次读取失败，自动断开"
+                        )
+                        break
+                    time.sleep(self.POLL_INTERVAL)
+                    continue
+
+                # ---- 读取成功，重置错误计数 ----
+                consecutive_errors = 0
+                registers = result.registers
+
+                # ====== 【诊断日志】打印原始寄存器值 ======
+                print(f"[MODBUS] 📥 原始寄存器值 ({len(registers)} 个): {registers}")
+
+                if len(registers) < self.READ_COUNT:
+                    print(f"[MODBUS] ❌ 数据不完整: 期望 {self.READ_COUNT} 个, 实际 {len(registers)} 个")
+                    self.status_msg.emit(
+                        f"⚠️ Modbus 返回数据不完整: "
+                        f"期望 {self.READ_COUNT} 个，实际 {len(registers)} 个"
+                    )
+                    time.sleep(self.POLL_INTERVAL)
+                    continue
+
+                # ================================================================
+                #  严格按照索引解包（对应任务文档要求）
+                # ================================================================
+                ips = registers[0]                  # 30001 瞬时砂击率
+                mass_rate_raw = registers[2]        # 30003 平均质量/秒（×100存储）
+                total_mass_top = registers[4]       # 30005 累计总砂量高位
+                total_mass_bottom = registers[5]    # 30006 累计总砂量低位
+                relay_status = registers[8]         # 30009 警报位映射
+                current_raw = registers[9]          # 30010 模拟电流（×100存储）
+
+                # ====== 【诊断日志】打印解包后的中间值 ======
+                print(f"[MODBUS] 📊 解包: ips={ips}  mass_rate_raw={mass_rate_raw}  "
+                      f"top={total_mass_top}  bottom={total_mass_bottom}  "
+                      f"relay=0x{relay_status:02X}  current_raw={current_raw}")
+
+
+                # ---- 解码真实物理值 ----
+                # mass_rate: ×100 存储，转回 g/s
+                mass_rate = mass_rate_raw / 100.0
+                # total_mass: 高低位拼接 (top << 16 | bottom)
+                total_mass = (total_mass_top << 16) + total_mass_bottom
+                # current: ×100 存储，转回 mA
+                current_ma = current_raw * 0.01
+
+                # ---- 打包为 dict 发射 ----
+                modbus_data = {
+                    'ips': ips,
+                    'mass_rate': mass_rate,
+                    'total_mass': float(total_mass),
+                    'relay_status': relay_status,
+                    'current_ma': current_ma,
+                    'raw_registers': list(registers),  # 完整原始数据供调试
+                }
+
+                self.data_received.emit(modbus_data)
+
+                # ---- 等待下一次轮询 ----
+                time.sleep(self.POLL_INTERVAL)
+
+            except Exception as e:
+                # ====== 【执行纪律】任何异常绝不传播到 UI 线程 ======
+                consecutive_errors += 1
+                self.status_msg.emit(
+                    f"⚠️ Modbus 轮询异常: {str(e)} (第 {consecutive_errors} 次)"
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    self.status_msg.emit(
+                        "❌ Modbus 连续异常，自动断开连接"
+                    )
+                    break
+                time.sleep(self.POLL_INTERVAL)
+
+        # ---- 线程结束，清理连接 ----
+        self._cleanup()
+
+    def _cleanup(self):
+        """安全关闭 Modbus 客户端连接"""
+        try:
+            if self.client and hasattr(self.client, 'close'):
+                self.client.close()
+                self.status_msg.emit("🔌 Modbus 连接已关闭")
+        except Exception:
+            pass
+
+    def stop(self):
+        """安全停止 Modbus 轮询线程"""
+        self._is_running = False
+        self._cleanup()
+        self.wait(2000)
+

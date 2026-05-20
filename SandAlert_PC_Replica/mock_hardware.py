@@ -161,7 +161,7 @@ def _engine_tdoa_array(master_fd: int):
             #  Step B：生成并发送一个高能撞击事件
             # ============================================================
             # 🎯 强制定角测试（验证算法准确性）
-            current_angle = 45.0  
+            current_angle = np.random.uniform(0.0, 360.0)  
             
             # 1) 直接调用 TDOAEngine 里面物理极其完美的阵列生成器！
             # 产生自带高斯包络的宽带 Chirp 脉冲

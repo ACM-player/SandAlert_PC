@@ -18,7 +18,8 @@ from ui.tabs.signal_traces import SignalTracesTab
 from ui.tabs.parameters import ParametersTab
 from ui.datalog_view import DataLogWidget
 from ui.dialogs.setup_dialog import SetupDialog  # 通信设置对话框
-from core.comm import FileReplayThread, SerialReaderThread
+from core.comm import FileReplayThread, SerialReaderThread, ModbusReaderThread
+
 
 class MainWindow(QMainWindow):
     """SandAlert PC 主窗口：含实时监测和历史日志双模式"""
@@ -65,8 +66,10 @@ class MainWindow(QMainWindow):
         self.param_tab.caution_level_input.textChanged.connect(self.on_alarm_levels_changed)
         self.param_tab.alarm_level_input.textChanged.connect(self.on_alarm_levels_changed)
 
-        # ---- 历史日志分析按钮绑定 ----
-        self.datalog_view.btn_load_log.clicked.connect(self.load_historical_logs)
+        # ---- 历史日志分析按钮绑定（双核导入） ----
+        # 按钮 A: CSV 文件（已在 DataLogWidget 内部绑定 _on_load_csv）
+        # 按钮 B: TXT 文件夹（已在 DataLogWidget 内部绑定 _on_load_folder）
+        # 两个按钮的 click 信号均已直接在 DataLogWidget 构造时连接
 
     def init_menu_bar(self):
         """初始化菜单栏"""
@@ -161,16 +164,19 @@ class MainWindow(QMainWindow):
 
     def show_setup_dialog(self):
         """
-        弹出通信设置对话框，支持两种数据源：
+        弹出通信设置对话框，支持三种数据源：
         
-        1. 串口模式（默认）：
-           - 用户选择串口号和波特率
-           - 连接真实硬件或虚拟串口（mock_hardware.py）
-           - 使用 SerialReaderThread 读取数据
+        1. Mock String Mode（默认）：
+           - 使用 SerialReaderThread 从虚拟串口读取声学波形数据
+           - 用于无硬件时的算法调试
         
-        2. 文件回放模式：
-           - 用户选择包含 .txt 文件的文件夹
-           - 使用 FileReplayThread 回放数据（无硬件时的替代方案）
+        2. Modbus RTU Mode：
+           - 使用 ModbusReaderThread 通过 Modbus 协议读取仪表全量参数
+           - 支持 RTU（真实串口）和 TCP（本地测试）两种子模式
+        
+        3. 文件回放模式：
+           - 使用 FileReplayThread 从本地 .txt 文件回放数据
+           - 无硬件时的替代方案
         """
         dialog = SetupDialog(self)
         if dialog.exec():
@@ -182,7 +188,9 @@ class MainWindow(QMainWindow):
             # ---- 获取用户在对话框中设置的值 ----
             port = dialog.com_combo.currentText()
             baudrate = dialog.baud_combo.currentText()
-            use_file_replay = dialog.file_replay_mode  # 是否使用文件回放模式
+            use_file_replay = dialog.file_replay_mode
+            use_modbus = dialog.modbus_mode
+            use_tcp = dialog.modbus_tcp_check.isChecked() if use_modbus else False
             
             if use_file_replay:
                 # ====== 文件回放模式 ======
@@ -195,13 +203,40 @@ class MainWindow(QMainWindow):
                     self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
                     self.active_thread.status_msg.connect(lambda msg: print(f"SYS MSG: {msg}"))
                     self.active_thread.start()
+                    
+            elif use_modbus:
+                # ====== Modbus RTU/TCP 模式 ======
+                if use_tcp:
+                    # TCP 模式：连接本地 Mock 服务器
+                    tcp_host = dialog.tcp_host_input.text().strip()
+                    tcp_port = int(dialog.tcp_port_input.text().strip())
+                    print(f"\n[调试] Modbus TCP 模式，连接 {tcp_host}:{tcp_port}")
+                    self.active_thread = ModbusReaderThread(
+                        port_or_host=tcp_host,
+                        use_tcp=True,
+                        tcp_port=tcp_port,
+                    )
+                else:
+                    # RTU 模式：通过串口连接真实仪表
+                    print(f"\n[调试] Modbus RTU 模式，串口 {port}，波特率 {baudrate}")
+                    self.active_thread = ModbusReaderThread(
+                        port_or_host=port,
+                        use_tcp=False,
+                    )
+                
+                # 连接信号：Modbus 发射 dict，UI 层通过类型检测处理
+                self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
+                self.active_thread.status_msg.connect(lambda msg: print(f"MODBUS: {msg}"))
+                self.active_thread.start()
+                
             else:
-                # ====== 串口模式 ======
-                print(f"\n[调试] 串口模式，连接 {port}，波特率 {baudrate}")
+                # ====== Mock String 串口模式（默认） ======
+                print(f"\n[调试] Mock String 串口模式，连接 {port}，波特率 {baudrate}")
                 self.active_thread = SerialReaderThread(port, baudrate)
                 self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
                 self.active_thread.status_msg.connect(lambda msg: print(f"SERIAL: {msg}"))
                 self.active_thread.start()
+
     
     def stop_active_thread(self):
         """
@@ -213,17 +248,6 @@ class MainWindow(QMainWindow):
             self.active_thread.stop()
             self.active_thread = None
     
-    def load_historical_logs(self):
-        """
-        加载历史日志：弹出 Mac 原生文件夹选择器
-        """
-        data_dir = QFileDialog.getExistingDirectory(self, "选择存放历史现场数据的文件夹进行宏观分析", "/")
-        
-        if data_dir:
-            current_threshold = self.signal_tab.user_threshold
-            current_factor = self.signal_tab.K_v2
-            self.datalog_view.start_parsing(data_dir, current_threshold, current_factor)
-
     # ==================== 安全关闭：优雅终止所有后台线程 ====================
     def closeEvent(self, event):
         """
@@ -234,12 +258,8 @@ class MainWindow(QMainWindow):
         # 1. 停止活跃的通信线程（串口或文件回放）
         self.stop_active_thread()
 
-        # 2. 停止历史日志解析线程
-        if hasattr(self.datalog_view, 'parser_thread') and self.datalog_view.parser_thread.isRunning():
-            print("[Shutdown] 正在停止历史日志解析线程...")
-            self.datalog_view.parser_thread.stop()
-            if not self.datalog_view.parser_thread.wait(2000):
-                print("[Shutdown] 警告：历史日志解析线程未能在 2 秒内退出")
+        # 2. 停止历史日志解析线程（TXT 文件夹后台解析）
+        self.datalog_view.stop_parser()
 
         # 3. 停止 TDOA 后台工作线程（SignalTracesTab）
         if hasattr(self, 'signal_tab') and hasattr(self.signal_tab, 'stop_all_workers'):
