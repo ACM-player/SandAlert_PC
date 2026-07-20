@@ -17,6 +17,8 @@ from core.tdoa_worker import TDOAWorker
 
 class SignalTracesTab(QWidget):
     """标签页 A: 实时波形图 + 三相分离器效率评估 + CSV 工业报表 + TDOA 阵列定位"""
+    RATE_LABEL_WIDTH = 290
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -34,6 +36,10 @@ class SignalTracesTab(QWidget):
         # ---- 2. IPS 和 Mass Rate 标签 ----
         self.impact_label = QLabel("Impact rate = 0 /s")
         self.mass_label = QLabel("Mass rate = 0.000 g/s")
+        for rate_label in (self.impact_label, self.mass_label):
+            # 固定占位，避免 [Server] / [Server Modbus] 文本切换时挤压右侧控件。
+            rate_label.setFixedWidth(self.RATE_LABEL_WIDTH)
+            rate_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.info_layout.addWidget(self.impact_label)
         self.info_layout.addWidget(self.mass_label)
         
@@ -74,7 +80,8 @@ class SignalTracesTab(QWidget):
         self.alarm_limit = 0.10
         
         # ==================== 主分割器：左侧波形图 + 右侧极坐标图 ====================
-        pg.setConfigOptions(antialias=True)
+        # 高频波形不使用抗锯齿，避免将 CPU 消耗在像素级平滑上。
+        pg.setConfigOptions(antialias=False)
         self.main_splitter = QSplitter(Qt.Horizontal)
         
         # ---- 左侧：波形图 ----
@@ -85,9 +92,28 @@ class SignalTracesTab(QWidget):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         
         # 三条曲线：原始信号(红)、处理信号(蓝)、阈值线(绿)
-        self.raw_curve = self.plot_widget.plot(pen=pg.mkPen('r', width=1.5), name="Raw Signal")
-        self.avg_curve = self.plot_widget.plot(pen=pg.mkPen('b', width=2, style=Qt.DashLine), name="Average")
-        self.th_curve = self.plot_widget.plot(pen=pg.mkPen('g', width=2, style=Qt.DashLine), name="Threshold")
+        self.raw_curve = self.plot_widget.plot(
+            pen=pg.mkPen('r', width=1.5), name="Raw Signal", antialias=False
+        )
+        self.avg_curve = self.plot_widget.plot(
+            pen=pg.mkPen('b', width=2, style=Qt.DashLine),
+            name="Average",
+            antialias=False,
+        )
+        self.th_curve = self.plot_widget.plot(
+            pen=pg.mkPen('g', width=2, style=Qt.DashLine),
+            name="Threshold",
+            antialias=False,
+        )
+
+        # 全局视图按屏幕像素自动做 peak 降采样，保留冲击上下包络；
+        # Item 级裁剪会跳过视口外的数据。曲线只在更新处调用 setData()。
+        self.plot_widget.getPlotItem().setDownsampling(
+            ds=True, auto=True, mode='peak'
+        )
+        for curve in (self.raw_curve, self.avg_curve, self.th_curve):
+            curve.setDownsampling(ds=1, auto=True, method='peak')
+            curve.setClipToView(True)
         
         # 十字光标
         self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('k', style=Qt.DashLine))
