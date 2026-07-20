@@ -542,3 +542,59 @@ class ModbusReaderThread(QThread):
         self._cleanup()
         self.wait(2000)
 
+
+# =============================================================================
+# EdgeGatewayThread：连接本机独立 Edge 采集进程
+# =============================================================================
+class EdgeGatewayThread(QThread):
+    """接收 Edge 本地网关发布的原始波形与服务器分析结果。"""
+
+    waveform_received = Signal(object)
+    event_received = Signal(object)
+    status_msg = Signal(str)
+
+    def __init__(self, url="ws://127.0.0.1:8766", parent=None):
+        super().__init__(parent)
+        self.url = url
+        self._is_running = False
+        self._socket = None
+
+    def run(self):
+        import json
+        import websocket
+        from shared.waveform_codec import decode_waveform
+
+        self._is_running = True
+        try:
+            self._socket = websocket.create_connection(self.url, timeout=2.0)
+            self._socket.settimeout(1.0)
+            self.status_msg.emit(f"✅ Edge Gateway 已连接: {self.url}")
+            while self._is_running:
+                try:
+                    message = self._socket.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if isinstance(message, bytes):
+                    _, array = decode_waveform(message)
+                    self.waveform_received.emit(array)
+                else:
+                    payload = json.loads(message)
+                    self.event_received.emit(payload)
+        except Exception as exc:
+            if self._is_running:
+                self.status_msg.emit(f"❌ Edge Gateway 连接异常: {exc}")
+        finally:
+            self._close_socket()
+
+    def _close_socket(self):
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
+
+    def stop(self):
+        self._is_running = False
+        self._close_socket()
+        self.wait(2000)

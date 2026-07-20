@@ -194,6 +194,7 @@ class SignalTracesTab(QWidget):
         self.tdoa_history = []          # 存储历史角度（度）
         self.TDOA_HISTORY_MAX = 50      # 最多保留 50 个点
         self.tdoa_last_angle = None     # 最近一次角度
+        self._edge_mode = False         # True 时算法在远端服务器执行
         
         # ==================== 数据缓存与 DSP 引擎 ====================
         self.data_len = 3000  # 视窗大小：3000 个采样点
@@ -291,6 +292,11 @@ class SignalTracesTab(QWidget):
         - 开启：启动 TDOA 工作线程
         - 关闭：停止 TDOA 工作线程，清空极坐标图
         """
+        if self._edge_mode:
+            self.tdoa_status_label.setText(
+                "TDOA: 等待服务器结果" if enabled else "TDOA: 远端显示已关闭"
+            )
+            return
         if enabled:
             if not self.tdoa_worker.isRunning():
                 self.tdoa_worker.start()
@@ -455,6 +461,106 @@ class SignalTracesTab(QWidget):
             self.vLine.setPos(mousePoint.x())
             self.hLine.setPos(mousePoint.y())
             self.crosshair_label.setText(f"X: {mousePoint.x():.2f} s, Y: {mousePoint.y():.2f} V")
+
+    # ==================== Edge/Server 前后端分离入口 ====================
+    def set_edge_mode(self, enabled: bool):
+        """切换到独立 Edge 采集 + 服务器计算模式。"""
+        self._edge_mode = enabled
+        if enabled:
+            if self.tdoa_worker.isRunning():
+                self.tdoa_worker.stop()
+            self.cb_tdoa.setChecked(True)
+            self.tdoa_status_label.setText("TDOA: 等待服务器结果")
+            self.btn_csv_log.setEnabled(False)
+            self.btn_csv_log.setToolTip("Edge 模式下正式记录由服务器集中保存")
+        else:
+            self.btn_csv_log.setEnabled(True)
+            self.btn_csv_log.setToolTip("")
+
+    def update_edge_waveform(self, new_data):
+        """仅在 Mac 本地绘制 Edge 发布的原始波形，不执行本地算法。"""
+        if new_data.ndim == 2:
+            shift = min(new_data.shape[1], self.data_len)
+            ch1 = new_data[0, -shift:]
+            self.voltage_data = np.roll(self.voltage_data, -shift)
+            self.voltage_data[-shift:] = ch1
+            if new_data.shape[0] == 4:
+                self.multi_channel_buffer = np.roll(
+                    self.multi_channel_buffer, -shift, axis=1
+                )
+                self.multi_channel_buffer[:, -shift:] = new_data[:, -shift:]
+        else:
+            shift = min(len(new_data), self.data_len)
+            self.voltage_data = np.roll(self.voltage_data, -shift)
+            self.voltage_data[-shift:] = new_data[-shift:]
+        self.raw_curve.setData(self.voltage_data)
+
+    def update_from_edge_event(self, event):
+        """消费服务器通过 Edge 转发的分析、Modbus 和连接状态事件。"""
+        event_type = event.get("type", "")
+        if event_type == "analysis.result":
+            data = event
+            ips = int(data.get("ips", 0))
+            mass_rate = float(data.get("mass_rate", 0.0))
+            threshold = float(data.get("threshold", self.user_threshold))
+            self.impact_label.setText(f"Impact rate = {ips} /s  [Server]")
+            self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s  [Server]")
+            self.th_curve.setData(np.full(self.data_len, threshold))
+            self._update_edge_efficiency(mass_rate)
+            self._set_alarm_style(data.get("alarm_level", "normal"))
+            angle = data.get("tdoa_angle_deg")
+            if angle is not None and data.get("tdoa_reliable", False):
+                self.on_tdoa_result(
+                    float(angle), float(data.get("tdoa_cost") or 0.0), None
+                )
+        elif event_type == "tdoa.result":
+            data = event.get("data", {})
+            angle = data.get("angle_deg")
+            if angle is not None and data.get("reliable", False):
+                self.on_tdoa_result(
+                    float(angle), float(data.get("cost") or 0.0), None
+                )
+        elif event_type == "modbus.result":
+            data = event.get("data", {})
+            self.impact_label.setText(
+                f"Impact rate = {int(data.get('ips', 0))} /s  [Server Modbus]"
+            )
+            mass_rate = float(data.get("mass_rate", 0.0))
+            self.mass_label.setText(
+                f"Mass rate = {mass_rate:.5f} g/s  [Server Modbus]"
+            )
+            relay = int(data.get("relay_status", 0))
+            level = "critical" if relay & 0x02 else "caution" if relay & 0x01 else "normal"
+            self._set_alarm_style(level)
+            self._update_edge_efficiency(mass_rate)
+        elif event_type == "edge.connection":
+            status = event.get("data", {}).get("status", "unknown")
+            self.tdoa_status_label.setText(f"Server: {status}")
+        elif event_type == "service.error":
+            message = event.get("data", {}).get("message", "unknown error")
+            self.tdoa_status_label.setText(f"Server Error: {message}")
+
+    def _update_edge_efficiency(self, mass_rate: float):
+        try:
+            flow = float(self.fluid_flow_input.text())
+        except ValueError:
+            flow = 10.0
+        efficiency = np.clip((mass_rate / 1000.0) / flow * 100.0 if flow > 0 else 0.0, 0, 100)
+        self.efficiency_bar.setValue(int(round(efficiency)))
+        self.efficiency_bar.setFormat(f"Efficiency: {efficiency:.4f}%")
+
+    def _set_alarm_style(self, level: str):
+        if level == "critical":
+            text, background, color = "CRITICAL ALARM", "#dc3545", "white"
+        elif level == "caution":
+            text, background, color = "CAUTION", "#ffc107", "black"
+        else:
+            text, background, color = "NORMAL", "#28a745", "white"
+        self.alarm_indicator.setText(text)
+        self.alarm_indicator.setStyleSheet(
+            f"background-color: {background}; color: {color}; "
+            "font-weight: bold; border-radius: 5px;"
+        )
 
     # ==================== 核心数据更新入口 ====================
     def update_from_serial(self, new_data):

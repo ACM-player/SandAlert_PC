@@ -18,7 +18,9 @@ from ui.tabs.signal_traces import SignalTracesTab
 from ui.tabs.parameters import ParametersTab
 from ui.datalog_view import DataLogWidget
 from ui.dialogs.setup_dialog import SetupDialog  # 通信设置对话框
-from core.comm import FileReplayThread, SerialReaderThread, ModbusReaderThread
+from core.comm import (
+    EdgeGatewayThread, FileReplayThread, SerialReaderThread, ModbusReaderThread,
+)
 
 
 class MainWindow(QMainWindow):
@@ -190,9 +192,27 @@ class MainWindow(QMainWindow):
             baudrate = dialog.baud_combo.currentText()
             use_file_replay = dialog.file_replay_mode
             use_modbus = dialog.modbus_mode
+            use_edge = dialog.edge_mode
             use_tcp = dialog.modbus_tcp_check.isChecked() if use_modbus else False
             
-            if use_file_replay:
+            if use_edge:
+                edge_url = dialog.edge_url_input.text().strip()
+                print(f"\n[调试] Edge Service 模式，连接 {edge_url}")
+                self.active_thread = EdgeGatewayThread(edge_url)
+                self.active_thread.waveform_received.connect(
+                    self.signal_tab.update_edge_waveform
+                )
+                self.active_thread.event_received.connect(
+                    self.signal_tab.update_from_edge_event
+                )
+                self.active_thread.status_msg.connect(
+                    lambda msg: print(f"EDGE: {msg}")
+                )
+                self.signal_tab.set_edge_mode(True)
+                self.active_thread.start()
+
+            elif use_file_replay:
+                self.signal_tab.set_edge_mode(False)
                 # ====== 文件回放模式 ======
                 data_dir = QFileDialog.getExistingDirectory(
                     self, "选择存放现场数据文件的文件夹", "/"
@@ -205,6 +225,7 @@ class MainWindow(QMainWindow):
                     self.active_thread.start()
                     
             elif use_modbus:
+                self.signal_tab.set_edge_mode(False)
                 # ====== Modbus RTU/TCP 模式 ======
                 if use_tcp:
                     # TCP 模式：连接本地 Mock 服务器
@@ -230,6 +251,7 @@ class MainWindow(QMainWindow):
                 self.active_thread.start()
                 
             else:
+                self.signal_tab.set_edge_mode(False)
                 # ====== Mock String 串口模式（默认） ======
                 print(f"\n[调试] Mock String 串口模式，连接 {port}，波特率 {baudrate}")
                 self.active_thread = SerialReaderThread(port, baudrate)

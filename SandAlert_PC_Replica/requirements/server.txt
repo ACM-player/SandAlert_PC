@@ -1,0 +1,9 @@
+fastapi>=0.115,<1
+h5py>=3.12,<4
+numpy>=1.26,<3
+pydantic>=2.8,<3
+scipy>=1.13,<2
+SQLAlchemy>=2.0,<3
+tomli>=2.0,<3; python_version < "3.11"
+uvicorn[standard]>=0.34,<1
+websockets>=14,<16

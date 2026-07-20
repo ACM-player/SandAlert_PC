@@ -1,0 +1,7 @@
+numpy>=1.26,<3
+pydantic>=2.8,<3
+pyserial>=3.5,<4
+pymodbus>=3.8,<4
+tomli>=2.0,<3; python_version < "3.11"
+websocket-client>=1.8,<2
+websockets>=14,<16

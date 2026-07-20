@@ -3,7 +3,8 @@ SandAlert PC - 通信设置对话框
 ==============================
 功能：让用户选择数据源类型和通信参数。
 
-支持三种数据源模式：
+支持四种数据源模式：
+  0. Edge Service Mode：连接本机独立采集服务（前后端分离）
   1. Mock String Mode（默认）：模拟字符串模式，连接虚拟串口
   2. Modbus RTU Mode：通过 Modbus RTU/TCP 协议连接 SandAlert 仪表
   3. File Replay Mode：从本地 .txt 文件回放数据（无硬件时的替代方案）
@@ -34,7 +35,7 @@ class SetupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Setup - Communication Settings")
-        self.setFixedSize(420, 350)
+        self.setFixedSize(460, 430)
         
         # ====== 主布局 ======
         main_layout = QVBoxLayout(self)
@@ -43,9 +44,13 @@ class SetupDialog(QDialog):
         mode_group = QGroupBox("Data Source Mode")
         mode_layout = QVBoxLayout()
         
-        # Mock String 模式（默认选中）
+        # Edge 服务模式（第一阶段推荐）
+        self.radio_edge = QRadioButton("Edge Service Mode (Local Gateway)")
+        self.radio_edge.setChecked(True)
+        self.radio_edge.toggled.connect(self.on_mode_changed)
+
+        # Mock String 模式（旧版兼容）
         self.radio_serial = QRadioButton("Mock String Mode (Virtual Serial)")
-        self.radio_serial.setChecked(True)
         self.radio_serial.toggled.connect(self.on_mode_changed)
         
         # Modbus RTU 模式
@@ -56,6 +61,7 @@ class SetupDialog(QDialog):
         self.radio_file = QRadioButton("File Replay Mode (Local .txt files)")
         self.radio_file.toggled.connect(self.on_mode_changed)
         
+        mode_layout.addWidget(self.radio_edge)
         mode_layout.addWidget(self.radio_serial)
         mode_layout.addWidget(self.radio_modbus)
         mode_layout.addWidget(self.radio_file)
@@ -84,6 +90,10 @@ class SetupDialog(QDialog):
         
         self.form_layout.addRow("Com Port:", self.com_combo)
         self.form_layout.addRow("Baud Rate:", self.baud_combo)
+
+        self.edge_url_input = QLineEdit("ws://127.0.0.1:8766")
+        self.edge_url_input.setPlaceholderText("ws://127.0.0.1:8766")
+        self.form_layout.addRow("Edge Gateway:", self.edge_url_input)
         
         # ====== Modbus TCP 选项（仅在 Modbus 模式显示） ======
         self.modbus_tcp_check = QCheckBox("Use TCP (Local Test)")
@@ -107,7 +117,7 @@ class SetupDialog(QDialog):
         main_layout.addLayout(self.form_layout)
         
         # ====== 提示标签 ======
-        self.lbl_hint = QLabel("Mock String Mode: 连接虚拟串口模拟 4 通道声学数据")
+        self.lbl_hint = QLabel("Edge Service: 本地波形显示 + 服务器远程计算")
         self.lbl_hint.setStyleSheet("color: #666; font-style: italic;")
         self.lbl_hint.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.lbl_hint)
@@ -121,7 +131,9 @@ class SetupDialog(QDialog):
         # ====== 内部状态 ======
         self.file_replay_mode = False
         self.modbus_mode = False
+        self.edge_mode = True
         self.use_tcp = False
+        self.on_mode_changed()
     
     def on_mode_changed(self):
         """
@@ -132,10 +144,23 @@ class SetupDialog(QDialog):
         """
         self.file_replay_mode = False
         self.modbus_mode = False
+        self.edge_mode = False
         
-        if self.radio_serial.isChecked():
+        if self.radio_edge.isChecked():
+            self.edge_mode = True
+            self.form_layout.setEnabled(True)
+            self.edge_url_input.setVisible(True)
+            self.com_combo.setVisible(False)
+            self.baud_combo.setVisible(False)
+            self.modbus_tcp_check.setVisible(False)
+            self.tcp_host_input.setVisible(False)
+            self.tcp_port_input.setVisible(False)
+            self.lbl_hint.setText("Edge Service: 本地波形显示 + 服务器远程计算")
+
+        elif self.radio_serial.isChecked():
             # ====== Mock String Mode ======
             self.form_layout.setEnabled(True)
+            self.edge_url_input.setVisible(False)
             self.com_combo.setVisible(True)
             self.baud_combo.setVisible(True)
             self.modbus_tcp_check.setVisible(False)
@@ -147,6 +172,7 @@ class SetupDialog(QDialog):
             # ====== Modbus RTU Mode ======
             self.modbus_mode = True
             self.form_layout.setEnabled(True)
+            self.edge_url_input.setVisible(False)
             self.com_combo.setVisible(True)
             self.baud_combo.setVisible(True)
             self.modbus_tcp_check.setVisible(True)
@@ -168,6 +194,7 @@ class SetupDialog(QDialog):
             # ====== File Replay Mode ======
             self.file_replay_mode = True
             self.form_layout.setEnabled(False)
+            self.edge_url_input.setVisible(False)
             self.com_combo.setVisible(False)
             self.baud_combo.setVisible(False)
             self.modbus_tcp_check.setVisible(False)
