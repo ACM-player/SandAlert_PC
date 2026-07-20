@@ -1,0 +1,12 @@
+[server]
+host = "127.0.0.1"
+port = 8765
+token = "change-me"
+database_url = "sqlite:///./runtime/sandalert.sqlite3"
+waveform_dir = "./runtime/waveforms"
+threshold_margin = 0.008
+calibration_factor = 1.2
+caution_limit = 0.05
+alarm_limit = 0.10
+dsp_sample_rate = 1000
+tdoa_enabled = true

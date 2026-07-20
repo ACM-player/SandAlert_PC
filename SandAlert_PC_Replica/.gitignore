@@ -17,3 +17,4 @@ dist/
 
 # 你本地的现场测试数据
 *.txt
+!requirements/*.txt

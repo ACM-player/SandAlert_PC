@@ -1,0 +1,16 @@
+[edge]
+edge_id = "mac-edge-01"
+server_url = "ws://127.0.0.1:8765/v1/ingest"
+token = "change-me"
+local_host = "127.0.0.1"
+local_port = 8766
+spool_dir = "./runtime/edge-spool"
+max_spool_gib = 20.0
+source = "file_and_mock_modbus"
+replay_path = "./runtime/sample_data"
+replay_fs_hz = 2000000
+replay_chunk_samples = 500
+replay_speed = 0.001
+replay_start_delay_seconds = 2.0
+replay_loop = true
+reconnect_max_seconds = 30.0
