@@ -190,21 +190,26 @@ class TDOAWorker(QThread):
             try:
                 # ---- 执行一站式 DOA 估计 ----
                 t0 = time.perf_counter()
-                est_angle, tdoa_obs, angles, costs = (
-                    self._engine.compute_doa(X)
-                )
+                result = self._engine.compute_doa_detailed(X)
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
                 # ---- 评估估计可靠性 ----
-                cost_min = float(np.min(costs))
+                cost_min = float(np.min(result.cost_values))
 
-                if cost_min > self.COST_LIKELY_THRESHOLD:
+                if (
+                    cost_min > self.COST_LIKELY_THRESHOLD
+                    or not result.diagnostics.signal_like
+                ):
                     # 似然极低：可能是杂波偶然越过了阈值
                     # 不发射 doa_result，只发射低似然警告
                     self.doa_likelihood_low.emit(cost_min)
                 else:
                     # 可靠估计 → 发射结果信号
-                    self.doa_result.emit(est_angle, cost_min, tdoa_obs)
+                    self.doa_result.emit(
+                        result.angle_deg,
+                        cost_min,
+                        result.tdoa_obs,
+                    )
 
             except Exception as e:
                 self.doa_error.emit(f"TDOA 计算异常: {str(e)}")

@@ -107,9 +107,13 @@ port = 8765
 token = "替换为双方一致的长随机令牌"
 database_url = "sqlite:///./runtime/sandalert.sqlite3"
 waveform_dir = "./runtime/waveforms"
+tdoa_bandpass_enabled = false
+tdoa_band_low_hz = 100000.0
+tdoa_band_high_hz = 300000.0
 ```
 
 端口 `8765` 只应通过可信 VPN 或受控网络开放。
+TDOA 频域限带在真实传感器频谱确认前应保持关闭；确认现场有效频带后再调整并启用。
 
 ### 2. 配置 Mac Edge Service
 
@@ -240,7 +244,17 @@ cd /home/lks/project/SandAlert_PC/SandAlert_PC_Replica
 /home/lks/miniconda3/envs/core/bin/python -m pytest -q
 ```
 
-第一阶段基线为 6 项测试通过，覆盖波形编解码、采集、断线缓存、持久化和 WebSocket 服务。
+当前自动化测试覆盖波形编解码、采集、断线缓存、持久化、WebSocket 服务，以及 TDOA 物理时延窗口、亚采样插值和纯噪声拒绝。
+
+执行 200 组 TDOA 方法对照评估：
+
+```bash
+cd ..
+conda run -n playground python scripts/evaluate_tdoa.py \
+  --trials 200 --seeds 42 --snr-db 10 --delay-mode fractional
+```
+
+需要验证尚未默认启用的 100–300 kHz 频域限带时，追加 `--include-bandpass`。结果会写入仓库根目录的 `tdoa_evaluation_results.csv`，包含每种方法的角度误差、Cost、候选峰数量、峰值置信度和计算耗时。
 
 ## 数据与故障处理
 
