@@ -18,7 +18,14 @@ class SessionProcessor:
 
     def __post_init__(self) -> None:
         self.dsp = DSPEngine(sample_rate=self.settings.dsp_sample_rate)
-        self.tdoa = TDOAEngine(fs=2_000_000, radius=0.05, c=1500.0)
+        self.tdoa = TDOAEngine(
+            fs=2_000_000,
+            radius=0.05,
+            c=1500.0,
+            bandpass_enabled=self.settings.tdoa_bandpass_enabled,
+            band_low_hz=self.settings.tdoa_band_low_hz,
+            band_high_hz=self.settings.tdoa_band_high_hz,
+        )
         self.window_len = 3000
         self.voltage = np.zeros(self.window_len, dtype=np.float32)
         self.multichannel = np.zeros((4, self.window_len), dtype=np.float32)
@@ -83,10 +90,13 @@ class SessionProcessor:
             if start >= 0:
                 slice_4ch = self.multichannel[:, start:end].copy()
                 self.tdoa.fs = meta.fs_hz
-                est_angle, _, _, costs = self.tdoa.compute_doa(slice_4ch)
-                angle = float(est_angle)
-                cost = float(np.min(costs))
-                reliable = cost <= 1e-8
+                tdoa_result = self.tdoa.compute_doa_detailed(slice_4ch)
+                angle = float(tdoa_result.angle_deg)
+                cost = float(np.min(tdoa_result.cost_values))
+                reliable = (
+                    cost <= 1e-8
+                    and tdoa_result.diagnostics.signal_like
+                )
                 self.last_tdoa_timestamp_ns = meta.timestamp_ns
                 self.impact_active = True
 

@@ -23,6 +23,9 @@ class ServerSettings(BaseModel):
     alarm_limit: float = 0.10
     dsp_sample_rate: int = 1000
     tdoa_enabled: bool = True
+    tdoa_bandpass_enabled: bool = False
+    tdoa_band_low_hz: float = Field(default=100_000.0, gt=0)
+    tdoa_band_high_hz: float = Field(default=300_000.0, gt=0)
 
 
 class EdgeSettings(BaseModel):
