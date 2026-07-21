@@ -6,7 +6,7 @@ import pyqtgraph as pg
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                                QCheckBox, QLineEdit, QProgressBar, QPushButton,
                                QFileDialog, QSplitter, QGroupBox)
-from PySide6.QtCore import QTimer, Qt, QRectF
+from PySide6.QtCore import QTimer, Qt, QRectF, Signal
 from PySide6.QtGui import QPen
 import csv               # 用于 CSV 文件写入（工业报表数据持久化）
 import traceback         # 用于 UI 槽函数内的异常打印诊断
@@ -17,6 +17,8 @@ from core.tdoa_worker import TDOAWorker
 
 class SignalTracesTab(QWidget):
     """标签页 A: 实时波形图 + 三相分离器效率评估 + CSV 工业报表 + TDOA 阵列定位"""
+    calibration_progress = Signal(float, float, int, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -209,6 +211,8 @@ class SignalTracesTab(QWidget):
         # ====== 标定状态变量 ======
         self.is_calibrating = False
         self.accumulated_energy = 0.0
+        self.accumulated_impacts = 0.0
+        self.calibration_sample_count = 0
         
         # ====== CSV 录制状态变量 ======
         self.is_recording = False       # 是否正在录制
@@ -499,12 +503,17 @@ class SignalTracesTab(QWidget):
         """消费服务器通过 Edge 转发的分析、Modbus 和连接状态事件。"""
         event_type = event.get("type", "")
         if event_type == "analysis.result":
-            data = event
-            ips = int(data.get("ips", 0))
+            # 当前协议为扁平结构，同时兼容未来由 data 包裹的事件结构。
+            data = event.get("data", event)
+            ips = int(data.get("impact_rate", data.get("ips", 0)))
             mass_rate = float(data.get("mass_rate", 0.0))
             threshold = float(data.get("threshold", self.user_threshold))
-            self.impact_label.setText(f"Impact rate = {ips} /s  [Server]")
-            self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s  [Server]")
+            self._update_rate_metrics(
+                ips,
+                mass_rate,
+                source="Server",
+                window_energy=data.get("window_energy"),
+            )
             self.th_curve.setData(np.full(self.data_len, threshold))
             self._update_edge_efficiency(mass_rate)
             self._set_alarm_style(data.get("alarm_level", "normal"))
@@ -522,12 +531,10 @@ class SignalTracesTab(QWidget):
                 )
         elif event_type == "modbus.result":
             data = event.get("data", {})
-            self.impact_label.setText(
-                f"Impact rate = {int(data.get('ips', 0))} /s  [Server Modbus]"
-            )
+            ips = int(data.get("impact_rate", data.get("ips", 0)))
             mass_rate = float(data.get("mass_rate", 0.0))
-            self.mass_label.setText(
-                f"Mass rate = {mass_rate:.5f} g/s  [Server Modbus]"
+            self._update_rate_metrics(
+                ips, mass_rate, source="Server Modbus"
             )
             relay = int(data.get("relay_status", 0))
             level = "critical" if relay & 0x02 else "caution" if relay & 0x01 else "normal"
@@ -539,6 +546,46 @@ class SignalTracesTab(QWidget):
         elif event_type == "service.error":
             message = event.get("data", {}).get("message", "unknown error")
             self.tdoa_status_label.setText(f"Server Error: {message}")
+
+    def _update_rate_metrics(
+        self, impact_rate, mass_rate: float, source: str = "", window_energy=None
+    ):
+        """统一更新顶部指标，并将同一份数据送入标定累加器。"""
+        impacts = max(float(impact_rate), 0.0)
+        source_suffix = f"  [{source}]" if source else ""
+        impact_text = f"{int(impacts)}" if impacts.is_integer() else f"{impacts:.2f}"
+        self.impact_label.setText(
+            f"Impact rate = {impact_text} /s{source_suffix}"
+        )
+        self.mass_label.setText(
+            f"Mass rate = {float(mass_rate):.5f} g/s{source_suffix}"
+        )
+        self._accumulate_calibration_sample(impacts, window_energy, source or "Local")
+
+    def _accumulate_calibration_sample(
+        self, impacts: float, window_energy, source: str
+    ):
+        """累加当前活动数据源的撞击数和可用声学能量。"""
+        if not self.is_calibrating:
+            return
+
+        energy = 0.0 if window_energy is None else max(float(window_energy), 0.0)
+        self.accumulated_impacts += impacts
+        self.accumulated_energy += energy
+        self.calibration_sample_count += 1
+        self.calibration_progress.emit(
+            self.accumulated_impacts,
+            self.accumulated_energy,
+            self.calibration_sample_count,
+            source,
+        )
+        if self.calibration_sample_count == 1 or self.calibration_sample_count % 10 == 0:
+            print(
+                "[Calibration] "
+                f"source={source}, samples={self.calibration_sample_count}, "
+                f"total_impacts={self.accumulated_impacts:.0f}, "
+                f"total_energy={self.accumulated_energy:.6f}"
+            )
 
     def _update_edge_efficiency(self, mass_rate: float):
         try:
@@ -600,12 +647,11 @@ class SignalTracesTab(QWidget):
                 processed_signal = self.voltage_data  # 保持波形
                 threshold_limit = self.user_threshold
                 
-                # Modbus 没有"窗口能量"概念，跳过标定累加
+                # Modbus 没有窗口能量，但其撞击数仍进入统一标定累加器。
                 shift = 50  # 给 CSV 一个合理的 dt 基值（0.05s）
                 
-                # ---- 更新状态显示 ----
-                self.impact_label.setText(f"Impact rate = {ips} /s  [Modbus]")
-                self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s  [Modbus]")
+                # ---- 更新状态显示，并复用同一标定数据入口 ----
+                self._update_rate_metrics(ips, mass_rate, source="Modbus")
             except Exception as e:
                 print(f"[UI] ❌ Modbus 更新界面时发生崩溃: {e}")
                 traceback.print_exc()
@@ -660,13 +706,10 @@ class SignalTracesTab(QWidget):
                 )
             )
             
-            # ---- 标定累加逻辑 ----
-            if getattr(self, 'is_calibrating', False):
-                self.accumulated_energy += window_energy
-            
-            # ---- 更新 UI 数字 ----
-            self.impact_label.setText(f"Impact rate = {ips} /s")
-            self.mass_label.setText(f"Mass rate = {mass_rate:.5f} g/s")
+            # ---- 更新 UI 数字，并复用同一标定数据入口 ----
+            self._update_rate_metrics(
+                ips, mass_rate, source="", window_energy=window_energy
+            )
             
             # Modbus 模式下无电流数据时使用模拟值
             current_ma = 4.0 + (mass_rate * 0.1)

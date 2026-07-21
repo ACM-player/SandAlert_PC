@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self.param_tab.btn_start_calib.clicked.connect(self.start_calibration)
         self.param_tab.btn_stop_calib.clicked.connect(self.stop_calibration)
         self.param_tab.factor_input.textChanged.connect(self.on_factor_changed)
+        self.signal_tab.calibration_progress.connect(self.on_calibration_progress)
 
         # ---- 报警阈值绑定 ----
         self.param_tab.caution_level_input.textChanged.connect(self.on_alarm_levels_changed)
@@ -140,10 +141,25 @@ class MainWindow(QMainWindow):
         """开始标定：清空能量池，进入累加模式"""
         self.signal_tab.is_calibrating = True
         self.signal_tab.accumulated_energy = 0.0
+        self.signal_tab.accumulated_impacts = 0.0
+        self.signal_tab.calibration_sample_count = 0
         self.param_tab.btn_start_calib.setEnabled(False)
         self.param_tab.btn_stop_calib.setEnabled(True)
-        self.param_tab.lbl_calib_status.setText("Status: Accumulating Acoustic Energy... Please inject sand now!")
+        self.param_tab.lbl_calib_status.setText(
+            "Status: Accumulating... Total Impacts: 0 | Energy: 0.000000"
+        )
         self.param_tab.lbl_calib_status.setStyleSheet("color: red; font-weight: bold;")
+
+    def on_calibration_progress(
+        self, total_impacts, total_energy, sample_count, source
+    ):
+        """显示来自当前活动数据源的实时标定累加进度。"""
+        if not self.signal_tab.is_calibrating:
+            return
+        self.param_tab.lbl_calib_status.setText(
+            f"Status: Accumulating [{source}] | Samples: {sample_count} | "
+            f"Total Impacts: {total_impacts:.0f} | Energy: {total_energy:.6f}"
+        )
 
     def stop_calibration(self):
         """停止标定：计算出专属转换系数并应用"""
@@ -153,13 +169,23 @@ class MainWindow(QMainWindow):
         try:
             injected_mass = float(self.param_tab.calib_mass_input.text())
             total_energy = self.signal_tab.accumulated_energy
-            if total_energy == 0:
+            total_impacts = self.signal_tab.accumulated_impacts
+            if injected_mass <= 0:
+                raise ValueError
+            if total_energy <= 0 and total_impacts <= 0:
                 self.param_tab.lbl_calib_status.setText("Status: Failed. No sand impacts detected.")
                 self.param_tab.lbl_calib_status.setStyleSheet("color: orange;")
                 return
-            new_factor = total_energy / injected_mass
+            # 正常波形/Server 分析优先使用声学能量；仅有 impact_rate 的
+            # Modbus/兼容数据包则以累计撞击数作为可用的标定量。
+            calibration_value = total_energy if total_energy > 0 else total_impacts
+            metric_name = "Energy" if total_energy > 0 else "Impacts"
+            new_factor = calibration_value / injected_mass
             self.param_tab.factor_input.setText(f"{new_factor:.6f}")
-            self.param_tab.lbl_calib_status.setText(f"Status: Success! Factor Applied. Total Energy: {total_energy:.4f}")
+            self.param_tab.lbl_calib_status.setText(
+                f"Status: Success! Factor Applied from {metric_name}. "
+                f"Total Impacts: {total_impacts:.0f} | Total Energy: {total_energy:.6f}"
+            )
             self.param_tab.lbl_calib_status.setStyleSheet("color: green; font-weight: bold;")
         except ValueError:
             self.param_tab.lbl_calib_status.setText("Status: Error. Invalid Mass Input.")
