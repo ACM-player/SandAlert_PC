@@ -1,5 +1,7 @@
 import os
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -41,6 +43,54 @@ def test_rate_labels_and_waveform_curves_are_stable_and_optimized():
             assert curve.opts["autoDownsample"] is True
             assert curve.opts["downsampleMethod"] == "peak"
             assert curve.opts["clipToView"] is True
+
+        view_box = tab.plot_widget.getViewBox()
+        assert view_box.state["autoRange"] == [False, False]
+        assert tab.plot_widget.viewRange()[1] == pytest.approx([-3.5, 2.5])
+        assert tab.ui_refresh_timer.interval() == 33
+        assert tab.ui_refresh_timer.isActive()
+    finally:
+        tab.stop_all_workers()
+        tab.close()
+        app.processEvents()
+
+
+def test_edge_callbacks_only_cache_and_timer_performs_set_data():
+    app = QApplication.instance() or QApplication([])
+    tab = SignalTracesTab()
+    tab.ui_refresh_timer.stop()
+    try:
+        raw_set_data = Mock(wraps=tab.raw_curve.setData)
+        threshold_set_data = Mock(wraps=tab.th_curve.setData)
+        tab.raw_curve.setData = raw_set_data
+        tab.th_curve.setData = threshold_set_data
+
+        base = np.arange(80, dtype=np.float64).reshape(4, 20)
+        for sequence in range(100):
+            source = base + sequence
+            tab.update_edge_waveform(source)
+            tab.update_from_edge_event({
+                "type": "analysis.result",
+                "ips": sequence,
+                "mass_rate": 0.25,
+                "threshold": 0.01,
+                "alarm_level": "normal",
+            })
+
+        assert raw_set_data.call_count == 0
+        assert threshold_set_data.call_count == 0
+        assert isinstance(tab._latest_waveform, np.ndarray)
+        assert tab._latest_waveform.ndim == 1
+        assert tab._latest_waveform.dtype == np.float32
+        assert tab._latest_waveform.flags.c_contiguous
+        np.testing.assert_array_equal(tab._latest_waveform, (base + 99)[0])
+
+        tab._refresh_edge_ui()
+
+        assert raw_set_data.call_count == 1
+        assert threshold_set_data.call_count == 1
+        assert tab._latest_waveform is None
+        np.testing.assert_array_equal(tab.voltage_data[-20:], (base + 99)[0])
     finally:
         tab.stop_all_workers()
         tab.close()

@@ -1,4 +1,6 @@
 import time
+from threading import Lock
+
 import numpy as np
 from scipy.signal import find_peaks
 
@@ -18,6 +20,8 @@ from core.tdoa_worker import TDOAWorker
 class SignalTracesTab(QWidget):
     """标签页 A: 实时波形图 + 三相分离器效率评估 + CSV 工业报表 + TDOA 阵列定位"""
     RATE_LABEL_WIDTH = 290
+    WAVEFORM_LENGTH = 3000
+    UI_REFRESH_INTERVAL_MS = 33
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,6 +94,11 @@ class SignalTracesTab(QWidget):
         self.plot_widget.setLabel('left', 'Voltage', units='V')
         self.plot_widget.setLabel('bottom', 'Time', units='s')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        waveform_view = self.plot_widget.getViewBox()
+        waveform_view.disableAutoRange()
+        self.plot_widget.setXRange(0, self.WAVEFORM_LENGTH - 1, padding=0)
+        # 原始传感器基线约为 -2.85 V，因此下界保留到 -3.5 V。
+        self.plot_widget.setYRange(-3.5, 2.5, padding=0)
         
         # 三条曲线：原始信号(红)、处理信号(蓝)、阈值线(绿)
         self.raw_curve = self.plot_widget.plot(
@@ -223,9 +232,18 @@ class SignalTracesTab(QWidget):
         self._edge_mode = False         # True 时算法在远端服务器执行
         
         # ==================== 数据缓存与 DSP 引擎 ====================
-        self.data_len = 3000  # 视窗大小：3000 个采样点
+        self.data_len = self.WAVEFORM_LENGTH
         self.time_data = np.arange(-self.data_len, 0)  # X 轴为相对采样点
         self.voltage_data = np.full(self.data_len, -2.85)  # 预填充接近真实的底噪值
+
+        # WebSocket 回调只写入缓存；唯一的图形刷新入口由 30 FPS 定时器驱动。
+        self._ui_cache_lock = Lock()
+        self._latest_waveform = None
+        self._pending_edge_events = {}
+        self.ui_refresh_timer = QTimer(self)
+        self.ui_refresh_timer.setInterval(self.UI_REFRESH_INTERVAL_MS)
+        self.ui_refresh_timer.timeout.connect(self._refresh_edge_ui)
+        self.ui_refresh_timer.start()
         
         # ====== 黄金阈值：0.008V ======
         self.user_threshold = 0.008
@@ -504,25 +522,49 @@ class SignalTracesTab(QWidget):
             self.btn_csv_log.setToolTip("")
 
     def update_edge_waveform(self, new_data):
-        """仅在 Mac 本地绘制 Edge 发布的原始波形，不执行本地算法。"""
-        if new_data.ndim == 2:
-            shift = min(new_data.shape[1], self.data_len)
-            ch1 = new_data[0, -shift:]
-            self.voltage_data = np.roll(self.voltage_data, -shift)
-            self.voltage_data[-shift:] = ch1
-            if new_data.shape[0] == 4:
-                self.multi_channel_buffer = np.roll(
-                    self.multi_channel_buffer, -shift, axis=1
-                )
-                self.multi_channel_buffer[:, -shift:] = new_data[:, -shift:]
-        else:
-            shift = min(len(new_data), self.data_len)
-            self.voltage_data = np.roll(self.voltage_data, -shift)
-            self.voltage_data[-shift:] = new_data[-shift:]
-        self.raw_curve.setData(self.voltage_data)
+        """WebSocket 波形回调：只缓存一维 ndarray，禁止在此处重绘。"""
+        array = np.asarray(new_data)
+        if array.size == 0:
+            return
+        if array.ndim == 2:
+            array = array[0]
+        elif array.ndim != 1:
+            array = array.reshape(-1)
+
+        # 独立、连续的 float32 快照，避免工作线程复用原始内存。
+        waveform = np.array(array, dtype=np.float32, copy=True, order='C').reshape(-1)
+        with self._ui_cache_lock:
+            self._latest_waveform = waveform
 
     def update_from_edge_event(self, event):
-        """消费服务器通过 Edge 转发的分析、Modbus 和连接状态事件。"""
+        """WebSocket 事件回调：按类型覆盖缓存，由 UI 时钟批量消费。"""
+        event_type = event.get("type", "")
+        with self._ui_cache_lock:
+            self._pending_edge_events[event_type] = dict(event)
+
+    def _refresh_edge_ui(self):
+        """约 30 FPS 消费最新快照，是 Edge 模式唯一的图形刷新入口。"""
+        with self._ui_cache_lock:
+            waveform = self._latest_waveform
+            self._latest_waveform = None
+            pending_events = list(self._pending_edge_events.values())
+            self._pending_edge_events.clear()
+
+        if waveform is not None:
+            shift = min(waveform.size, self.data_len)
+            if shift:
+                if shift < self.data_len:
+                    self.voltage_data[:-shift] = self.voltage_data[shift:]
+                    self.voltage_data[-shift:] = waveform[-shift:]
+                else:
+                    self.voltage_data[:] = waveform[-self.data_len:]
+                self.raw_curve.setData(self.voltage_data)
+
+        for event in pending_events:
+            self._apply_edge_event(event)
+
+    def _apply_edge_event(self, event):
+        """在 UI 刷新时钟内应用已节流的 Server 事件。"""
         event_type = event.get("type", "")
         if event_type == "analysis.result":
             data = event
@@ -916,6 +958,9 @@ class SignalTracesTab(QWidget):
         安全停止所有后台工作线程。
         由 MainWindow.closeEvent 在窗口关闭时调用。
         """
+        if hasattr(self, 'ui_refresh_timer'):
+            self.ui_refresh_timer.stop()
+
         # 停止 TDOA 工作线程
         if hasattr(self, 'tdoa_worker') and self.tdoa_worker.isRunning():
             print("[Shutdown] 正在停止 TDOA 工作线程...")
