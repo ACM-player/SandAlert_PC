@@ -257,6 +257,7 @@ def train_tcn(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     records = load_manifest(dataset_dir)
+    dataset_id = dataset_dir.name
     fs_hz = int(records[0]["sample_rate_hz"])
     window_samples = int(records[0]["window_samples"])
     hdf5_path = dataset_dir / "waveforms.h5"
@@ -535,7 +536,9 @@ def train_tcn(
     )
     promotion = _promotion_decision(test_metrics, dsp_test_metrics)
 
-    model_id = f"sandalert-tcn-v2-energy-residual-seed{seed}"
+    model_id = (
+        f"sandalert-tcn-v2-{dataset_id}-energy-residual-seed{seed}"
+    )
     checkpoint_path = output_dir / "candidate.pt"
     torch.save({
         "model_id": model_id,
@@ -543,6 +546,7 @@ def train_tcn(
         "sample_rate_hz": fs_hz,
         "window_samples": window_samples,
         "seed": seed,
+        "dataset_id": dataset_id,
         "aux_feature_names": list(AUX_FEATURE_NAMES),
         "aux_mean": aux_mean,
         "aux_std": aux_std,
@@ -593,6 +597,7 @@ def train_tcn(
         "threads": threads,
         "workers": workers,
         "seed": seed,
+        "dataset_id": dataset_id,
         "epochs": epochs,
         "energy_mode": "analytic_residual",
         "energy_loss_weight": energy_loss_weight,
