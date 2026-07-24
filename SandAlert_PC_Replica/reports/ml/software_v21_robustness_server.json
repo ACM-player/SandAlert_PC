@@ -1,0 +1,158 @@
+{
+  "report_version": 2,
+  "generated_at": "2026-07-24",
+  "scope": "synthetic_in_domain_and_ood_only",
+  "server": {
+    "python": "3.10.20",
+    "torch": "2.13.0+cpu",
+    "cuda_available": false,
+    "threads": 32,
+    "workers": 8,
+    "nice": 10
+  },
+  "datasets": {
+    "software_v21": {
+      "windows": 1000,
+      "splits": {
+        "train": 760,
+        "validation": 75,
+        "test": 165
+      },
+      "scenarios": 10,
+      "includes_mild_mechanical_noise": true
+    },
+    "stress_v2": {
+      "windows": 600,
+      "split": "test",
+      "severity_range": [0.75, 1.0],
+      "scenarios": [
+        "extreme_band_shift",
+        "severe_multipath",
+        "mechanical_interference",
+        "heavy_clipping",
+        "burst_dropout",
+        "compound_extreme"
+      ]
+    }
+  },
+  "energy_loss_sweep_before_mechanical_augmentation": {
+    "weight_0_5": {
+      "in_domain_energy_mae_db": 0.10317570716142654,
+      "ood_energy_mae_db": 1.0952720297210765,
+      "ood_ips_mae": 221.58620594918727
+    },
+    "weight_1_0": {
+      "in_domain_energy_mae_db": 0.09637872129678726,
+      "ood_energy_mae_db": 0.7961428010452274,
+      "ood_ips_mae": 196.91464959681034
+    },
+    "weight_2_0": {
+      "in_domain_energy_mae_db": 0.10524783283472061,
+      "ood_energy_mae_db": 0.740525662900498,
+      "ood_ips_mae": 240.61867599070072
+    },
+    "selected_weight": 1.0
+  },
+  "selected_candidate": {
+    "model_id": "sandalert-tcn-v2-software-v21-energy-residual-seed42",
+    "energy_loss_weight": 1.0,
+    "event_positive_weight": 1.0,
+    "event_threshold": 0.5,
+    "onnx_size_kib": 500,
+    "onnx_cpu_mean_latency_ms_100_runs": 0.5466224253177643,
+    "onnx_sha256": "82b89a6574bb782a750a8200763202a5184b934ede086ad3b6e1423d7a90e6c3"
+  },
+  "in_domain_test": {
+    "dsp": {
+      "event_f1": 0.7431192660550459,
+      "false_positive_rate": 0.654320987654321,
+      "false_negative_rate": 0.03571428571428571,
+      "ips_mae": 32590.553977272728,
+      "relative_energy_mae_db": 7.587675751884342
+    },
+    "feature_model": {
+      "event_f1": 0.9629629629629629,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 0.07142857142857142,
+      "ips_mae": 109.23344834765705,
+      "relative_energy_mae_db": 4.940634887185543
+    },
+    "tcn": {
+      "event_f1": 0.9693251533742331,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 0.05952380952380952,
+      "ips_mae": 79.94218444824219,
+      "relative_energy_mae_db": 0.12972845137119293
+    }
+  },
+  "ood_test": {
+    "dsp": {
+      "event_f1": 0.8114285714285714,
+      "false_positive_rate": 0.6666666666666666,
+      "false_negative_rate": 0.013888888888888888,
+      "ips_mae": 41254.8828125,
+      "relative_energy_mae_db": 7.366927880439843
+    },
+    "feature_model": {
+      "event_f1": 0.8612565445026178,
+      "false_positive_rate": 0.3125,
+      "false_negative_rate": 0.08611111111111111,
+      "ips_mae": 166.50373012545717,
+      "relative_energy_mae_db": 6.7911110953035845
+    },
+    "tcn_raw": {
+      "event_f1": 0.8583569405099151,
+      "false_positive_rate": 0.17916666666666667,
+      "false_negative_rate": 0.15833333333333333,
+      "ips_mae": 161.53866173406442,
+      "relative_energy_mae_db": 0.6243902428994713
+    },
+    "tcn_accepted": {
+      "event_f1": 0.9018789144050104,
+      "false_positive_rate": 0.23140495867768596,
+      "false_negative_rate": 0.08085106382978724,
+      "ips_mae": 159.94583965821212,
+      "relative_energy_mae_db": 0.27782826376893144
+    }
+  },
+  "quality_gate": {
+    "in_domain_coverage": 0.983,
+    "ood_coverage": 0.5933333333333334,
+    "hard_corruption_recall": 1.0,
+    "clean_or_nonhard_false_rejection_rate": 0.0,
+    "ood_scenario_coverage": {
+      "burst_dropout": 0.01,
+      "compound_extreme": 0.02,
+      "extreme_band_shift": 1.0,
+      "heavy_clipping": 0.53,
+      "mechanical_interference": 1.0,
+      "severe_multipath": 1.0
+    }
+  },
+  "mechanical_interference": {
+    "false_positive_rate": 0.7,
+    "false_negative_rate": 0.16666666666666666,
+    "event_f1": 0.7246376811594203,
+    "status": "known_unresolved_failure_mode"
+  },
+  "air_velocity_ablation": {
+    "available_fraction": 0.47833333333333333,
+    "with_air_energy_mae_db": 0.6243902428994713,
+    "without_air_energy_mae_db": 0.6130477323189941,
+    "decision": "keep_optional_but_do_not_depend_on_it"
+  },
+  "rejected_experiments": {
+    "event_positive_weight_1_5": {
+      "ood_event_f1": 0.8326639892904953,
+      "ood_false_positive_rate": 0.31666666666666665,
+      "ood_false_negative_rate": 0.1361111111111111,
+      "decision": "rejected"
+    }
+  },
+  "limitations": [
+    "The large energy improvement is primarily caused by target alignment and the analytic residual design, not by a directly comparable neural-network-only gain.",
+    "Mechanical interference remains a severe hard-negative failure mode.",
+    "Air velocity did not improve the frozen OOD result and remains optional.",
+    "All results are synthetic and do not establish field IPS or g/s accuracy."
+  ]
+}

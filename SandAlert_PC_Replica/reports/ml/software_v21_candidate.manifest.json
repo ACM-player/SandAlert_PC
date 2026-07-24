@@ -1,0 +1,121 @@
+{
+  "model_id": "sandalert-tcn-v2-software-v21-energy-residual-seed42",
+  "sample_rate_hz": 2000000,
+  "window_samples": 8192,
+  "device": "cpu",
+  "threads": 32,
+  "workers": 8,
+  "seed": 42,
+  "dataset_id": "software-v21",
+  "epochs": 10,
+  "energy_mode": "analytic_residual",
+  "energy_loss_weight": 1.0,
+  "event_decision_threshold": 0.5,
+  "event_target_false_positive_rate": 0.05,
+  "event_positive_weight": 1.0,
+  "calibrated_validation_metrics": {
+    "event_f1": 1.0,
+    "event_threshold": 0.5,
+    "event_average_precision": 1.0,
+    "false_positive_rate": 0.0,
+    "false_negative_rate": 0.0,
+    "confusion": {
+      "true_positive": 42,
+      "false_positive": 0,
+      "true_negative": 33,
+      "false_negative": 0
+    },
+    "ips_mae": 71.4372329711914,
+    "relative_energy_mae_db": 0.17054393887519836
+  },
+  "energy_residual_scale_db": 1.0,
+  "aux_feature_names": [
+    "analytic_relative_energy_db",
+    "log_rms",
+    "log_envelope_mean",
+    "spectral_centroid_fraction",
+    "spectral_bandwidth_fraction",
+    "spectral_entropy",
+    "band_low_fraction",
+    "band_mid_fraction",
+    "band_high_fraction",
+    "clipping_fraction",
+    "dropout_fraction",
+    "air_velocity_scaled",
+    "air_velocity_present"
+  ],
+  "aux_mean": [
+    2.97285795211792,
+    -5.025331020355225,
+    -5.086645603179932,
+    0.22699764370918274,
+    0.20585758984088898,
+    0.7405714988708496,
+    0.438454270362854,
+    0.32673966884613037,
+    0.23480573296546936,
+    0.0010881925700232387,
+    0.032113220542669296,
+    0.25504109263420105,
+    0.74210524559021
+  ],
+  "aux_std": [
+    9.013659477233887,
+    1.029879093170166,
+    0.9065500497817993,
+    0.12071357667446136,
+    0.09161504358053207,
+    0.11791536211967468,
+    0.3140561878681183,
+    0.3272143304347992,
+    0.2138809859752655,
+    0.005022731143981218,
+    0.030891958624124527,
+    0.20424820482730865,
+    0.4374772012233734
+  ],
+  "air_velocity_optional": true,
+  "particle_size_input": false,
+  "onnx_status": "exported",
+  "test_metrics": {
+    "event_f1": 0.9693251533742331,
+    "event_threshold": 0.5,
+    "event_average_precision": 0.9928303350747106,
+    "false_positive_rate": 0.0,
+    "false_negative_rate": 0.05952380952380952,
+    "confusion": {
+      "true_positive": 79,
+      "false_positive": 0,
+      "true_negative": 81,
+      "false_negative": 5
+    },
+    "ips_mae": 79.94218444824219,
+    "relative_energy_mae_db": 0.12972845137119293,
+    "loss": 0.3348538781205813
+  },
+  "dsp_test_metrics": {
+    "event_f1": 0.7431192660550459,
+    "event_threshold": 0.5,
+    "event_average_precision": 0.6010709439813917,
+    "false_positive_rate": 0.654320987654321,
+    "false_negative_rate": 0.03571428571428571,
+    "confusion": {
+      "true_positive": 81,
+      "false_positive": 53,
+      "true_negative": 28,
+      "false_negative": 3
+    },
+    "ips_mae": 32590.553977272728,
+    "relative_energy_mae_db": 7.587675751884342
+  },
+  "promotion": {
+    "eligible_for_shadow": true,
+    "event_f1_not_worse": true,
+    "ips_mae_not_worse": true,
+    "event_f1_relative_gain": 0.3044005150344618,
+    "ips_mae_relative_gain": 0.9975470750051076,
+    "required_relative_gain": 0.1,
+    "scope": "synthetic_holdout_only"
+  },
+  "onnx_sha256": "82b89a6574bb782a750a8200763202a5184b934ede086ad3b6e1423d7a90e6c3"
+}
