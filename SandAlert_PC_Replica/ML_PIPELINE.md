@@ -34,7 +34,8 @@ nice -n 10 python -m ml_pipeline train-tcn \
   --dataset runtime/ml-data/software-v2 \
   --output runtime/ml-models/tcn-v2-weight1 \
   --device cpu --threads 32 --workers 8 \
-  --energy-loss-weight 1.0 --event-target-fpr 0.05
+  --energy-loss-weight 1.0 --event-target-fpr 0.05 \
+  --event-positive-weight 1.0
 
 python -m ml_pipeline evaluate-stress \
   --dataset runtime/ml-data/stress-v2 \

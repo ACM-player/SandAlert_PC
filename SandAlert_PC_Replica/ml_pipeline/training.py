@@ -229,6 +229,7 @@ def train_tcn(
     seed: int = 42,
     energy_loss_weight: float = 1.0,
     event_target_false_positive_rate: float = 0.05,
+    event_positive_weight: float = 1.0,
 ) -> dict:
     import torch
     from torch import nn
@@ -242,6 +243,8 @@ def train_tcn(
         raise ValueError("energy loss weight must be positive")
     if not 0.0 <= event_target_false_positive_rate < 1.0:
         raise ValueError("target false-positive rate must remain within [0, 1)")
+    if event_positive_weight <= 0:
+        raise ValueError("event positive weight must be positive")
     _seed_everything(seed)
     torch.manual_seed(seed)
     torch.set_num_threads(max(1, int(threads)))
@@ -357,7 +360,11 @@ def train_tcn(
 
     model = SandAlertTCN(aux_feature_count=len(AUX_FEATURE_NAMES)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    event_loss = nn.BCEWithLogitsLoss()
+    event_loss = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(
+            float(event_positive_weight), dtype=torch.float32, device=device
+        )
+    )
     regression_loss = nn.SmoothL1Loss()
 
     def run_epoch(
@@ -541,6 +548,7 @@ def train_tcn(
         "aux_std": aux_std,
         "energy_residual_scale_db": energy_residual_scale_db,
         "event_decision_threshold": event_decision_threshold,
+        "event_positive_weight": event_positive_weight,
     }, checkpoint_path)
 
     onnx_path = output_dir / "candidate.onnx"
@@ -592,6 +600,7 @@ def train_tcn(
         "event_target_false_positive_rate": (
             event_target_false_positive_rate
         ),
+        "event_positive_weight": event_positive_weight,
         "calibrated_validation_metrics": calibrated_validation_metrics,
         "energy_residual_scale_db": energy_residual_scale_db,
         "aux_feature_names": list(AUX_FEATURE_NAMES),
