@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from ml_pipeline.dataset import generate_dataset
+from ml_pipeline.dataset import generate_dataset, generate_stress_dataset
+from ml_pipeline.evaluation import evaluate_stress
 from ml_pipeline.simulation import SimulationConfig
 from ml_pipeline.training import train_feature_baseline, train_tcn
 
@@ -54,6 +55,10 @@ def test_tcn_cpu_and_onnx_smoke(tmp_path):
     assert manifest["device"] == "cpu"
     assert manifest["onnx_sha256"]
     assert manifest["promotion"]["scope"] == "synthetic_holdout_only"
+    assert manifest["energy_mode"] == "analytic_residual"
+    assert manifest["air_velocity_optional"] is True
+    assert manifest["particle_size_input"] is False
+    assert manifest["aux_feature_names"]
 
     from server.ml_shadow import ONNXShadowModel
     from shared.settings import ServerSettings
@@ -70,3 +75,47 @@ def test_tcn_cpu_and_onnx_smoke(tmp_path):
     assert 0.0 <= probability <= 1.0
     assert ips >= 0.0
     assert isinstance(energy, float)
+
+
+def test_ood_stress_evaluation_smoke(tmp_path):
+    pytest.importorskip("sklearn")
+    pytest.importorskip("torch")
+    pytest.importorskip("onnxruntime")
+    dataset = tmp_path / "dataset"
+    stress = tmp_path / "stress"
+    baseline = tmp_path / "baseline"
+    tcn = tmp_path / "tcn"
+    _dataset(dataset)
+    generate_stress_dataset(
+        stress,
+        windows=60,
+        seed=2027,
+        config=SimulationConfig(
+            sample_rate_hz=1_000_000,
+            window_samples=1024,
+            channels=1,
+            resonance_high_hz=300_000.0,
+        ),
+    )
+    train_feature_baseline(dataset, baseline)
+    train_tcn(
+        dataset,
+        tcn,
+        epochs=1,
+        batch_size=16,
+        device="cpu",
+        threads=2,
+        workers=0,
+        seed=8,
+    )
+    report = evaluate_stress(
+        stress,
+        baseline / "feature_baseline.joblib",
+        tcn / "candidate.onnx",
+        tcn / "candidate.manifest.json",
+        tmp_path / "stress_report.json",
+    )
+    assert report["scope"] == "synthetic_ood_stress_only"
+    assert report["dataset"]["samples"] == 60
+    assert 0.0 <= report["rejection"]["coverage"] <= 1.0
+    assert report["air_velocity_ablation"]["available_fraction"] > 0.0

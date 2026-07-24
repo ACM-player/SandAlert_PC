@@ -12,16 +12,20 @@ import numpy as np
 from core.dsp_engine import DSPEngine
 from ml_pipeline.dataset import load_manifest, load_waveforms
 from ml_pipeline.features import FEATURE_NAMES, extract_feature_matrix
+from shared.ml_features import AUX_FEATURE_NAMES, extract_shadow_aux_features
 
 
 def _metrics(y_true_event, probability, y_true_ips, ips_estimate, y_true_energy, energy):
     from sklearn.metrics import average_precision_score, f1_score, mean_absolute_error
 
     predicted_event = np.asarray(probability) >= 0.5
+    event_classes = np.unique(y_true_event)
     return {
         "event_f1": float(f1_score(y_true_event, predicted_event, zero_division=0)),
-        "event_average_precision": float(
-            average_precision_score(y_true_event, probability)
+        "event_average_precision": (
+            float(average_precision_score(y_true_event, probability))
+            if event_classes.size > 1
+            else None
         ),
         "ips_mae": float(mean_absolute_error(y_true_ips, ips_estimate)),
         "relative_energy_mae_db": float(
@@ -35,6 +39,29 @@ def _targets(records: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     ips = np.asarray([row["ips_hz"] for row in records], dtype=float)
     energy = np.asarray([row["relative_energy_db"] for row in records], dtype=float)
     return event, ips, energy
+
+
+def _aux_feature_matrix(
+    records: list[dict],
+    waveforms: np.ndarray,
+    fs_hz: int,
+) -> np.ndarray:
+    values = []
+    for row, waveform in zip(records, waveforms):
+        air_velocity = (
+            row.get("air_velocity_m_s")
+            if row.get("air_velocity_available", False)
+            else None
+        )
+        values.append(
+            extract_shadow_aux_features(
+                waveform[0] if waveform.ndim == 2 else waveform,
+                fs_hz,
+                row.get("analytic_relative_energy_db"),
+                air_velocity,
+            ).values
+        )
+    return np.vstack(values).astype(np.float32)
 
 
 def _dsp_predictions(
@@ -173,6 +200,7 @@ def train_tcn(
     threads: int = 32,
     workers: int = 8,
     seed: int = 42,
+    energy_loss_weight: float = 1.0,
 ) -> dict:
     import torch
     from torch import nn
@@ -182,6 +210,8 @@ def train_tcn(
 
     if device != "cpu":
         raise ValueError("this phase is intentionally restricted to device='cpu'")
+    if energy_loss_weight <= 0:
+        raise ValueError("energy loss weight must be positive")
     _seed_everything(seed)
     torch.manual_seed(seed)
     torch.set_num_threads(max(1, int(threads)))
@@ -197,6 +227,34 @@ def train_tcn(
     fs_hz = int(records[0]["sample_rate_hz"])
     window_samples = int(records[0]["window_samples"])
     hdf5_path = dataset_dir / "waveforms.h5"
+
+    all_waveforms = load_waveforms(
+        dataset_dir, [int(row["index"]) for row in records]
+    )
+    all_aux = _aux_feature_matrix(records, all_waveforms, fs_hz)
+    aux_by_index = {
+        int(row["index"]): all_aux[position]
+        for position, row in enumerate(records)
+    }
+    train_positions = [
+        position
+        for position, row in enumerate(records)
+        if row["split"] == "train"
+    ]
+    train_aux = all_aux[np.asarray(train_positions, dtype=int)]
+    aux_mean = np.mean(train_aux, axis=0).astype(np.float32)
+    aux_std = np.std(train_aux, axis=0).astype(np.float32)
+    aux_std = np.maximum(aux_std, 1e-6)
+    train_residuals = np.asarray(
+        [
+            float(row["relative_energy_db"])
+            - float(row.get("analytic_relative_energy_db", 0.0))
+            for row in records
+            if row["split"] == "train"
+        ],
+        dtype=np.float32,
+    )
+    energy_residual_scale_db = max(float(np.std(train_residuals)), 1.0)
 
     class WaveformDataset(Dataset):
         def __init__(self, rows):
@@ -220,11 +278,23 @@ def train_tcn(
             mad = float(np.median(np.abs(waveform)))
             scale = max(1.4826 * mad, float(np.std(waveform)) * 0.1, 1e-8)
             waveform = np.clip(waveform / scale, -20.0, 20.0)
+            raw_aux = aux_by_index[int(row["index"])]
+            normalized_aux = (raw_aux - aux_mean) / aux_std
+            target_energy = float(row["relative_energy_db"])
+            analytic_energy = float(
+                row.get("analytic_relative_energy_db", 0.0)
+            )
+            energy_residual = (
+                target_energy - analytic_energy
+            ) / energy_residual_scale_db
             return (
                 torch.from_numpy(waveform[None, :].copy()),
+                torch.from_numpy(normalized_aux.copy()),
+                torch.from_numpy(raw_aux.copy()),
                 torch.tensor(float(row["event_count"] > 0), dtype=torch.float32),
                 torch.tensor(np.log1p(row["ips_hz"]), dtype=torch.float32),
-                torch.tensor(row["relative_energy_db"], dtype=torch.float32),
+                torch.tensor(target_energy, dtype=torch.float32),
+                torch.tensor(energy_residual, dtype=torch.float32),
             )
 
     split_rows = {
@@ -255,7 +325,7 @@ def train_tcn(
         persistent_workers=workers > 0,
     )
 
-    model = SandAlertTCN().to(device)
+    model = SandAlertTCN(aux_feature_count=len(AUX_FEATURE_NAMES)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     event_loss = nn.BCEWithLogitsLoss()
     regression_loss = nn.SmoothL1Loss()
@@ -270,19 +340,43 @@ def train_tcn(
         ips_estimates = []
         energy_values = []
         energy_estimates = []
-        for waveform, event, log_ips, energy in loader:
+        for (
+            waveform,
+            normalized_aux,
+            raw_aux,
+            event,
+            log_ips,
+            energy,
+            energy_residual,
+        ) in loader:
             waveform = waveform.to(device)
+            normalized_aux = normalized_aux.to(device)
+            raw_aux = raw_aux.to(device)
             event = event.to(device)
             log_ips = log_ips.to(device)
             energy = energy.to(device)
+            energy_residual = energy_residual.to(device)
             if train:
                 optimizer.zero_grad(set_to_none=True)
             with torch.set_grad_enabled(train):
-                event_logit, predicted_log_ips, predicted_energy = model(waveform)
+                (
+                    event_logit,
+                    predicted_log_ips,
+                    predicted_energy_residual,
+                ) = model(waveform, normalized_aux)
+                predicted_energy = (
+                    raw_aux[:, AUX_FEATURE_NAMES.index(
+                        "analytic_relative_energy_db"
+                    )]
+                    + predicted_energy_residual * energy_residual_scale_db
+                )
                 loss = (
                     event_loss(event_logit, event)
                     + regression_loss(predicted_log_ips, log_ips)
-                    + 0.5 * regression_loss(predicted_energy, energy)
+                    + energy_loss_weight
+                    * regression_loss(
+                        predicted_energy_residual, energy_residual
+                    )
                 )
                 if train:
                     loss.backward()
@@ -347,7 +441,7 @@ def train_tcn(
     )
     promotion = _promotion_decision(test_metrics, dsp_test_metrics)
 
-    model_id = f"sandalert-tcn-v1-seed{seed}"
+    model_id = f"sandalert-tcn-v2-energy-residual-seed{seed}"
     checkpoint_path = output_dir / "candidate.pt"
     torch.save({
         "model_id": model_id,
@@ -355,24 +449,40 @@ def train_tcn(
         "sample_rate_hz": fs_hz,
         "window_samples": window_samples,
         "seed": seed,
+        "aux_feature_names": list(AUX_FEATURE_NAMES),
+        "aux_mean": aux_mean,
+        "aux_std": aux_std,
+        "energy_residual_scale_db": energy_residual_scale_db,
     }, checkpoint_path)
 
     onnx_path = output_dir / "candidate.onnx"
     onnx_status = "exported"
     try:
-        wrapper = SandAlertONNXWrapper(model.eval())
+        wrapper = SandAlertONNXWrapper(
+            model.eval(),
+            aux_mean,
+            aux_std,
+            AUX_FEATURE_NAMES.index("analytic_relative_energy_db"),
+            energy_residual_scale_db,
+        )
         example = torch.zeros(1, 1, window_samples, dtype=torch.float32)
+        example_aux = torch.zeros(
+            1, len(AUX_FEATURE_NAMES), dtype=torch.float32
+        )
         torch.onnx.export(
             wrapper,
-            example,
+            (example, example_aux),
             onnx_path,
-            input_names=["waveform"],
+            input_names=["waveform", "aux_features"],
             output_names=[
                 "event_probability",
                 "ips_estimate",
                 "relative_energy_db",
             ],
-            dynamic_axes={"waveform": {0: "batch"}},
+            dynamic_axes={
+                "waveform": {0: "batch"},
+                "aux_features": {0: "batch"},
+            },
             opset_version=17,
             dynamo=False,
         )
@@ -388,6 +498,14 @@ def train_tcn(
         "workers": workers,
         "seed": seed,
         "epochs": epochs,
+        "energy_mode": "analytic_residual",
+        "energy_loss_weight": energy_loss_weight,
+        "energy_residual_scale_db": energy_residual_scale_db,
+        "aux_feature_names": list(AUX_FEATURE_NAMES),
+        "aux_mean": aux_mean.tolist(),
+        "aux_std": aux_std.tolist(),
+        "air_velocity_optional": True,
+        "particle_size_input": False,
         "onnx_status": onnx_status,
         "test_metrics": test_metrics,
         "dsp_test_metrics": dsp_test_metrics,

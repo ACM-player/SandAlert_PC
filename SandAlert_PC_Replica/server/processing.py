@@ -8,7 +8,13 @@ import numpy as np
 from core.dsp_engine import DSPEngine
 from core.tdoa_engine import TDOAEngine
 from server.ml_shadow import ONNXShadowModel, ShadowInferenceEngine
-from shared.contracts import AnalysisResult, MLResult, MLStatus, WaveformMetadata
+from shared.contracts import (
+    AnalysisResult,
+    MLContext,
+    MLResult,
+    MLStatus,
+    WaveformMetadata,
+)
 from shared.settings import ServerSettings
 
 
@@ -146,6 +152,7 @@ class ProcessorRegistry:
     def __init__(self, settings: ServerSettings):
         self.settings = settings
         self._processors: dict[str, SessionProcessor] = {}
+        self._ml_contexts: dict[str, MLContext] = {}
         self._ml_model = ONNXShadowModel(settings)
 
     def ml_status(self) -> MLStatus:
@@ -158,8 +165,22 @@ class ProcessorRegistry:
             processor = SessionProcessor(
                 meta.session_id, self.settings, self._ml_model
             )
+            context = self._ml_contexts.get(key)
+            if context is not None:
+                processor.shadow.set_context(
+                    context.air_velocity_m_s, context.timestamp_ns
+                )
             self._processors[key] = processor
         return processor
+
+    def update_ml_context(self, context: MLContext) -> None:
+        key = str(context.session_id)
+        self._ml_contexts[key] = context
+        processor = self._processors.get(key)
+        if processor is not None:
+            processor.shadow.set_context(
+                context.air_velocity_m_s, context.timestamp_ns
+            )
 
     def process(self, meta: WaveformMetadata, data: np.ndarray) -> AnalysisResult:
         return self._get_processor(meta).process(meta, data)

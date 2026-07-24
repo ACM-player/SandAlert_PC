@@ -4,7 +4,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from server.main import create_app
-from shared.contracts import EdgeHello, WaveformMetadata
+from shared.contracts import EdgeHello, MLContext, WaveformMetadata
 from shared.settings import ServerSettings
 from shared.waveform_codec import encode_waveform
 
@@ -80,3 +80,33 @@ def test_websocket_ml_unavailable_does_not_block_analysis(tmp_path):
             ml_result = websocket.receive_json()
             assert ml_result["type"] == "ml.result"
             assert ml_result["status"] == "warmup"
+
+
+def test_websocket_accepts_optional_ml_air_velocity_context(tmp_path):
+    settings = ServerSettings(
+        token="test-token",
+        database_url=f"sqlite:///{tmp_path / 'server.sqlite3'}",
+        waveform_dir=tmp_path / "waveforms",
+    )
+    session_id = uuid4()
+    app = create_app(settings)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/ingest?token=test-token"
+        ) as websocket:
+            websocket.send_text(EdgeHello(
+                edge_id="test-edge", session_id=session_id
+            ).model_dump_json())
+            assert websocket.receive_json()["type"] == "edge.ready"
+            assert websocket.receive_json()["type"] == "ml.status"
+            websocket.send_text(MLContext(
+                session_id=session_id,
+                timestamp_ns=1_000_000_000,
+                air_velocity_m_s=18.5,
+                source="simulated-flow-meter",
+            ).model_dump_json())
+            ack = websocket.receive_json()
+            assert ack["type"] == "ml.context.ack"
+            assert ack["data"]["air_velocity_available"] is True
+            context = app.state.sandalert.processors._ml_contexts[str(session_id)]
+            assert context.air_velocity_m_s == 18.5

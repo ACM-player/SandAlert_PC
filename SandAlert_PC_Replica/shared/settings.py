@@ -32,6 +32,11 @@ class ServerSettings(BaseModel):
     ml_max_emit_hz: float = Field(default=20.0, gt=0.0, le=100.0)
     ml_background_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
     ml_background_min_frames: int = Field(default=32, ge=4, le=100_000)
+    ml_air_velocity_m_s: float | None = Field(default=None, ge=0.0)
+    ml_context_max_age_seconds: float = Field(default=10.0, gt=0.0)
+    ml_max_clipping_fraction: float = Field(default=0.08, ge=0.0, le=1.0)
+    ml_max_dropout_fraction: float = Field(default=0.12, ge=0.0, le=1.0)
+    ml_spectral_ood_z_limit: float = Field(default=6.0, gt=0.0)
 
 
 class EdgeSettings(BaseModel):

@@ -43,6 +43,17 @@ class ModbusReading(StrictModel):
     raw_registers: list[int] = Field(default_factory=list)
 
 
+class MLContext(StrictModel):
+    """Optional operating condition input for the isolated ML path."""
+
+    type: Literal["ml.context"] = "ml.context"
+    version: int = PROTOCOL_VERSION
+    session_id: UUID
+    timestamp_ns: int = Field(default_factory=time.time_ns, ge=0)
+    air_velocity_m_s: float | None = Field(default=None, ge=0.0)
+    source: str = "unknown"
+
+
 class EdgeHello(StrictModel):
     type: Literal["edge.hello"] = "edge.hello"
     version: int = PROTOCOL_VERSION

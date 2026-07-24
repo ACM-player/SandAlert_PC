@@ -4,7 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
-from ml_pipeline.dataset import generate_dataset
+from ml_pipeline.dataset import generate_dataset, generate_stress_dataset
+from ml_pipeline.evaluation import evaluate_stress
 from ml_pipeline.simulation import SimulationConfig
 from ml_pipeline.training import train_feature_baseline, train_tcn
 
@@ -21,6 +22,16 @@ def _parser() -> argparse.ArgumentParser:
     simulate.add_argument("--window-samples", type=int, default=8192)
     simulate.add_argument("--channels", type=int, default=1)
 
+    stress = subparsers.add_parser(
+        "simulate-stress", help="generate an OOD-only stress dataset"
+    )
+    stress.add_argument("--output", type=Path, required=True)
+    stress.add_argument("--windows", type=int, default=600)
+    stress.add_argument("--seed", type=int, default=20260725)
+    stress.add_argument("--sample-rate", type=int, default=2_000_000)
+    stress.add_argument("--window-samples", type=int, default=8192)
+    stress.add_argument("--channels", type=int, default=1)
+
     baseline = subparsers.add_parser("train-baseline")
     baseline.add_argument("--dataset", type=Path, required=True)
     baseline.add_argument("--output", type=Path, required=True)
@@ -35,6 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     tcn.add_argument("--threads", type=int, default=32)
     tcn.add_argument("--workers", type=int, default=8)
     tcn.add_argument("--seed", type=int, default=42)
+    tcn.add_argument("--energy-loss-weight", type=float, default=1.0)
+
+    evaluate = subparsers.add_parser("evaluate-stress")
+    evaluate.add_argument("--dataset", type=Path, required=True)
+    evaluate.add_argument("--feature-model", type=Path, required=True)
+    evaluate.add_argument("--onnx", type=Path, required=True)
+    evaluate.add_argument("--manifest", type=Path, required=True)
+    evaluate.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -51,9 +70,20 @@ def main() -> None:
                 channels=args.channels,
             ),
         )
+    elif args.command == "simulate-stress":
+        result = generate_stress_dataset(
+            args.output,
+            windows=args.windows,
+            seed=args.seed,
+            config=SimulationConfig(
+                sample_rate_hz=args.sample_rate,
+                window_samples=args.window_samples,
+                channels=args.channels,
+            ),
+        )
     elif args.command == "train-baseline":
         result = train_feature_baseline(args.dataset, args.output)
-    else:
+    elif args.command == "train-tcn":
         result = train_tcn(
             args.dataset,
             args.output,
@@ -64,6 +94,15 @@ def main() -> None:
             threads=args.threads,
             workers=args.workers,
             seed=args.seed,
+            energy_loss_weight=args.energy_loss_weight,
+        )
+    else:
+        result = evaluate_stress(
+            args.dataset,
+            args.feature_model,
+            args.onnx,
+            args.manifest,
+            args.output,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

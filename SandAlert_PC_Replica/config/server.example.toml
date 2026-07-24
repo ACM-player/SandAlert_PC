@@ -20,3 +20,9 @@ ml_manifest_path = "./runtime/ml-models/candidate.manifest.json"
 ml_max_emit_hz = 20.0
 ml_background_seconds = 1.0
 ml_background_min_frames = 32
+# 可选气速只进入 ML 私有路径；缺失时模型使用 presence mask。
+# ml_air_velocity_m_s = 18.0
+ml_context_max_age_seconds = 10.0
+ml_max_clipping_fraction = 0.08
+ml_max_dropout_fraction = 0.12
+ml_spectral_ood_z_limit = 6.0

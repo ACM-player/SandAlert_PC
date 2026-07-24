@@ -14,7 +14,13 @@ from fastapi.responses import PlainTextResponse
 
 from server.processing import ProcessorRegistry
 from server.storage import Database, HDF5Archive
-from shared.contracts import Ack, EdgeHello, ModbusReading, parse_json_message
+from shared.contracts import (
+    Ack,
+    EdgeHello,
+    MLContext,
+    ModbusReading,
+    parse_json_message,
+)
 from shared.settings import ServerSettings, load_server_settings
 from shared.waveform_codec import decode_waveform
 
@@ -151,6 +157,21 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
                     await websocket.send_text(json.dumps({
                         "type": "modbus.result", "version": 1,
                         "data": reading.model_dump(mode="json"),
+                    }))
+                elif payload["type"] == "ml.context":
+                    context = MLContext.model_validate(payload)
+                    state.processors.update_ml_context(context)
+                    await websocket.send_text(json.dumps({
+                        "type": "ml.context.ack",
+                        "version": 1,
+                        "data": {
+                            "session_id": str(context.session_id),
+                            "timestamp_ns": context.timestamp_ns,
+                            "air_velocity_available": (
+                                context.air_velocity_m_s is not None
+                            ),
+                            "source": context.source,
+                        },
                     }))
                 elif payload["type"] == "ping":
                     await websocket.send_text(json.dumps({"type": "pong", "version": 1}))

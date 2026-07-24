@@ -10,6 +10,11 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from shared.contracts import AnalysisResult, MLResult, MLStatus, WaveformMetadata
+from shared.ml_features import (
+    AUX_FEATURE_NAMES,
+    SignalAuxFeatures,
+    extract_shadow_aux_features,
+)
 from shared.settings import ServerSettings
 
 
@@ -23,7 +28,11 @@ class ONNXShadowModel:
         self.target_fs_hz: int | None = None
         self.window_samples = 8192
         self.input_name = ""
+        self.input_names: list[str] = []
         self.output_names: list[str] = []
+        self.aux_feature_names: list[str] = []
+        self.aux_mean = np.empty(0, dtype=np.float32)
+        self.aux_std = np.empty(0, dtype=np.float32)
         self.reason = ""
         if settings.ml_enabled:
             self._load()
@@ -51,13 +60,25 @@ class ONNXShadowModel:
             self.session = ort.InferenceSession(
                 str(model_path), providers=["CPUExecutionProvider"]
             )
-            self.input_name = self.session.get_inputs()[0].name
+            self.input_names = [
+                item.name for item in self.session.get_inputs()
+            ]
+            self.input_name = self.input_names[0]
             self.output_names = [item.name for item in self.session.get_outputs()]
             self.model_id = str(manifest.get("model_id") or Path(model_path).stem)
             target_fs = manifest.get("sample_rate_hz")
             self.target_fs_hz = int(target_fs) if target_fs else None
             self.window_samples = int(
                 manifest.get("window_samples") or self.window_samples
+            )
+            self.aux_feature_names = list(
+                manifest.get("aux_feature_names") or []
+            )
+            self.aux_mean = np.asarray(
+                manifest.get("aux_mean") or [], dtype=np.float32
+            )
+            self.aux_std = np.asarray(
+                manifest.get("aux_std") or [], dtype=np.float32
             )
         except Exception as exc:  # onnxruntime exposes provider-specific errors
             self.session = None
@@ -76,12 +97,32 @@ class ONNXShadowModel:
             status="unavailable", model_id=self.model_id, reason=self.reason
         )
 
-    def predict(self, waveform: np.ndarray) -> tuple[float, float, float]:
+    def predict(
+        self,
+        waveform: np.ndarray,
+        aux_features: np.ndarray | None = None,
+    ) -> tuple[float, float, float]:
         if self.session is None:
             raise RuntimeError(self.reason or "ONNX model unavailable")
+        feeds = {
+            self.input_name: waveform.astype(
+                np.float32, copy=False
+            )[None, None, :]
+        }
+        if len(self.input_names) > 1:
+            expected = len(self.aux_feature_names) or len(AUX_FEATURE_NAMES)
+            if aux_features is None:
+                aux_features = np.zeros(expected, dtype=np.float32)
+            aux_array = np.asarray(aux_features, dtype=np.float32).reshape(-1)
+            if aux_array.size != expected:
+                raise ValueError(
+                    f"model expects {expected} auxiliary features; "
+                    f"received {aux_array.size}"
+                )
+            feeds[self.input_names[1]] = aux_array[None, :]
         outputs = self.session.run(
             self.output_names,
-            {self.input_name: waveform.astype(np.float32, copy=False)[None, None, :]},
+            feeds,
         )
         values = {
             name: float(np.asarray(value).reshape(-1)[0])
@@ -116,6 +157,8 @@ class ShadowInferenceEngine:
         self.target_samples_seen = 0
         self.last_emit_timestamp_ns = 0
         self.coalesced_windows = 0
+        self.air_velocity_m_s = settings.ml_air_velocity_m_s
+        self.context_timestamp_ns = 0
 
     def reset(self, fs_hz: int) -> None:
         self.current_fs_hz = int(fs_hz)
@@ -124,6 +167,65 @@ class ShadowInferenceEngine:
         self.target_samples_seen = 0
         self.last_emit_timestamp_ns = 0
         self.coalesced_windows = 0
+
+    def set_context(
+        self,
+        air_velocity_m_s: float | None,
+        timestamp_ns: int,
+    ) -> None:
+        self.air_velocity_m_s = air_velocity_m_s
+        self.context_timestamp_ns = int(timestamp_ns)
+
+    def _context_for(self, timestamp_ns: int) -> tuple[float | None, list[str]]:
+        if self.air_velocity_m_s is None:
+            return None, ["air_velocity_missing"]
+        if self.context_timestamp_ns <= 0:
+            return self.air_velocity_m_s, []
+        age_ns = max(0, timestamp_ns - self.context_timestamp_ns)
+        if age_ns > int(self.settings.ml_context_max_age_seconds * 1e9):
+            return None, ["air_velocity_context_stale"]
+        return self.air_velocity_m_s, []
+
+    def _quality_flags(self, features: SignalAuxFeatures) -> list[str]:
+        flags = []
+        if (
+            features.clipping_fraction
+            > self.settings.ml_max_clipping_fraction
+        ):
+            flags.append("clipping_excessive")
+        if (
+            features.dropout_fraction
+            > self.settings.ml_max_dropout_fraction
+        ):
+            flags.append("dropout_excessive")
+        if (
+            self.model.aux_feature_names
+            and self.model.aux_mean.size == len(self.model.aux_feature_names)
+            and self.model.aux_std.size == len(self.model.aux_feature_names)
+        ):
+            spectral_names = {
+                "spectral_centroid_fraction",
+                "spectral_bandwidth_fraction",
+                "band_low_fraction",
+                "band_mid_fraction",
+                "band_high_fraction",
+            }
+            indices = [
+                index
+                for index, name in enumerate(self.model.aux_feature_names)
+                if name in spectral_names
+            ]
+            if indices:
+                z = np.abs(
+                    (
+                        features.values[indices]
+                        - self.model.aux_mean[indices]
+                    )
+                    / np.maximum(self.model.aux_std[indices], 1e-6)
+                )
+                if float(np.max(z)) > self.settings.ml_spectral_ood_z_limit:
+                    flags.append("spectral_ood")
+        return flags
 
     def _background_capacity(self, meta: WaveformMetadata) -> int:
         frames_per_second = meta.fs_hz / max(meta.samples, 1)
@@ -224,10 +326,40 @@ class ShadowInferenceEngine:
                 **common,
             )
 
-        window = self._normalize(self.waveform[-self.model.window_samples:])
+        raw_window = self.waveform[-self.model.window_samples:]
+        air_velocity, context_flags = self._context_for(meta.timestamp_ns)
+        try:
+            aux_features = extract_shadow_aux_features(
+                raw_window,
+                self.model.target_fs_hz or meta.fs_hz,
+                relative_db,
+                air_velocity,
+            )
+        except ValueError as exc:
+            return MLResult(
+                status="skipped",
+                quality_flags=[f"invalid_aux_features:{exc}"],
+                **common,
+            )
+        quality_flags = context_flags + self._quality_flags(aux_features)
+        hard_rejection_flags = {
+            "clipping_excessive",
+            "dropout_excessive",
+            "spectral_ood",
+        }
+        if any(flag in hard_rejection_flags for flag in quality_flags):
+            return MLResult(
+                status="skipped",
+                quality_flags=quality_flags,
+                **common,
+            )
+
+        window = self._normalize(raw_window)
         started = time.perf_counter()
         try:
-            event_probability, ips_estimate, energy_estimate = self.model.predict(window)
+            event_probability, ips_estimate, energy_estimate = self.model.predict(
+                window, aux_features.values
+            )
         except Exception as exc:
             return MLResult(
                 status="unavailable",
@@ -241,6 +373,6 @@ class ShadowInferenceEngine:
             ips_estimate=ips_estimate,
             ml_relative_energy_db=energy_estimate,
             inference_latency_ms=(time.perf_counter() - started) * 1000.0,
-            quality_flags=[],
+            quality_flags=quality_flags,
             **common,
         )
