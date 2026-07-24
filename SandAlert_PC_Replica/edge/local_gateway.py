@@ -40,7 +40,7 @@ class LocalGateway:
                 event_type = json.loads(message).get("type")
                 if event_type in {
                     "analysis.result", "tdoa.result", "modbus.result",
-                    "edge.connection", "service.error",
+                    "ml.result", "ml.status", "edge.connection", "service.error",
                 }:
                     self.latest_events[event_type] = message
             except (ValueError, AttributeError):

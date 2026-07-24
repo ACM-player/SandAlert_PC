@@ -76,6 +76,34 @@ class AnalysisResult(StrictModel):
     tdoa_reliable: bool = False
 
 
+class MLResult(StrictModel):
+    type: Literal["ml.result"] = "ml.result"
+    version: int = PROTOCOL_VERSION
+    session_id: UUID
+    sequence: int = Field(ge=0)
+    timestamp_ns: int = Field(ge=0)
+    source: str = "unknown"
+    sample_rate_hz: int = Field(gt=0)
+    model_id: str = "unavailable"
+    status: Literal["warmup", "ready", "unavailable", "skipped"]
+    event_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    ips_estimate: float | None = Field(default=None, ge=0.0)
+    relative_energy_db: float | None = None
+    ml_relative_energy_db: float | None = None
+    background_energy: float | None = Field(default=None, ge=0.0)
+    inference_latency_ms: float | None = Field(default=None, ge=0.0)
+    quality_flags: list[str] = Field(default_factory=list)
+    coalesced_windows: int = Field(default=0, ge=0)
+
+
+class MLStatus(StrictModel):
+    type: Literal["ml.status"] = "ml.status"
+    version: int = PROTOCOL_VERSION
+    status: Literal["disabled", "loading", "ready", "unavailable"]
+    model_id: str = "unavailable"
+    reason: str = ""
+
+
 class ServiceEvent(StrictModel):
     type: str
     version: int = PROTOCOL_VERSION

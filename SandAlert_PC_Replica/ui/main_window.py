@@ -11,6 +11,7 @@
 #   5. closeEvent 安全终止所有后台线程，防止 Python 崩溃
 # =============================================================================
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QFileDialog, QStackedWidget
 from PySide6.QtGui import QActionGroup, QAction
 
@@ -21,12 +22,15 @@ from ui.dialogs.setup_dialog import SetupDialog  # 通信设置对话框
 from core.comm import (
     EdgeGatewayThread, FileReplayThread, SerialReaderThread, ModbusReaderThread,
 )
+from shared.settings import UISettings
+from ui.event_dispatcher import UiUpdateDispatcher
 
 
 class MainWindow(QMainWindow):
     """SandAlert PC 主窗口：含实时监测和历史日志双模式"""
-    def __init__(self):
+    def __init__(self, ui_settings: UISettings | None = None):
         super().__init__()
+        self.ui_settings = ui_settings or UISettings()
         self.setWindowTitle("SandAlert PC - Advanced Localization Version")
         self.resize(1000, 700)
         
@@ -40,7 +44,13 @@ class MainWindow(QMainWindow):
         # ---- 模式1：实时监测面板 (索引 0) ----
         self.main_tabs = QTabWidget()
         self.signal_tab = SignalTracesTab()
-        self.param_tab = ParametersTab()
+        self.param_tab = ParametersTab(
+            development_enabled=self.ui_settings.development_tab_enabled
+        )
+        self.ui_dispatcher = UiUpdateDispatcher(
+            refresh_interval_ms=self.ui_settings.refresh_interval_ms,
+            parent=self,
+        )
         self.main_tabs.addTab(self.signal_tab, "Signal Traces")
         self.main_tabs.addTab(self.param_tab, "Parameters")
         
@@ -55,6 +65,14 @@ class MainWindow(QMainWindow):
 
     def bind_signals(self):
         """统一管理内部的信号与槽绑定"""
+        self.ui_dispatcher.waveform_ready.connect(
+            self.signal_tab.update_edge_waveform
+        )
+        self.ui_dispatcher.event_ready.connect(self._apply_edge_event)
+        if self.param_tab.development_tab is not None:
+            self.ui_dispatcher.stats_ready.connect(
+                self.param_tab.development_tab.update_dispatch_stats
+            )
         # ---- 阈值绑定 ----
         self.param_tab.p160_input.textChanged.connect(self.on_threshold_changed)
         self.on_threshold_changed(self.param_tab.p160_input.text())
@@ -72,6 +90,11 @@ class MainWindow(QMainWindow):
         # 按钮 A: CSV 文件（已在 DataLogWidget 内部绑定 _on_load_csv）
         # 按钮 B: TXT 文件夹（已在 DataLogWidget 内部绑定 _on_load_folder）
         # 两个按钮的 click 信号均已直接在 DataLogWidget 构造时连接
+
+    def _apply_edge_event(self, event):
+        self.signal_tab.update_from_edge_event(event)
+        if self.param_tab.development_tab is not None:
+            self.param_tab.development_tab.update_from_edge_event(event)
 
     def init_menu_bar(self):
         """初始化菜单栏"""
@@ -199,11 +222,14 @@ class MainWindow(QMainWindow):
                 edge_url = dialog.edge_url_input.text().strip()
                 print(f"\n[调试] Edge Service 模式，连接 {edge_url}")
                 self.active_thread = EdgeGatewayThread(edge_url)
+                self.ui_dispatcher.reset()
                 self.active_thread.waveform_received.connect(
-                    self.signal_tab.update_edge_waveform
+                    self.ui_dispatcher.enqueue_waveform,
+                    Qt.ConnectionType.QueuedConnection,
                 )
                 self.active_thread.event_received.connect(
-                    self.signal_tab.update_from_edge_event
+                    self.ui_dispatcher.enqueue_event,
+                    Qt.ConnectionType.QueuedConnection,
                 )
                 self.active_thread.status_msg.connect(
                     lambda msg: print(f"EDGE: {msg}")
@@ -287,6 +313,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'signal_tab') and hasattr(self.signal_tab, 'stop_all_workers'):
             self.signal_tab.stop_all_workers()
 
-        # 4. 接受关闭事件
+        # 4. 停止 UI 合并刷新定时器
+        self.ui_dispatcher.stop()
+
+        # 5. 接受关闭事件
         print("[Shutdown] 所有后台线程已安全终止，窗口即将关闭。")
         event.accept()

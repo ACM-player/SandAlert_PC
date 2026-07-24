@@ -83,6 +83,9 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
                 "type": "edge.ready", "version": 1, "edge_id": edge_id,
                 "session_id": str(hello.session_id),
             }))
+            await websocket.send_text(
+                state.processors.ml_status().model_dump_json()
+            )
 
             while True:
                 message = await websocket.receive()
@@ -100,9 +103,10 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
                         await asyncio.to_thread(
                             state.database.add_waveform, meta, archive_path
                         )
-                        result = await asyncio.to_thread(
-                            state.processors.process, meta, array
+                        processing_output = await asyncio.to_thread(
+                            state.processors.process_detailed, meta, array
                         )
+                        result = processing_output.analysis
                         await asyncio.to_thread(state.database.add_analysis, result)
                     await websocket.send_text(Ack(
                         session_id=meta.session_id, sequence=meta.sequence,
@@ -110,6 +114,10 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
                     ).model_dump_json())
                     if not duplicate:
                         await websocket.send_text(result.model_dump_json())
+                        if processing_output.ml_result is not None:
+                            await websocket.send_text(
+                                processing_output.ml_result.model_dump_json()
+                            )
                         if result.tdoa_angle_deg is not None:
                             await websocket.send_text(json.dumps({
                                 "type": "tdoa.result", "version": 1,

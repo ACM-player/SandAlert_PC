@@ -26,6 +26,12 @@ class ServerSettings(BaseModel):
     tdoa_bandpass_enabled: bool = False
     tdoa_band_low_hz: float = Field(default=100_000.0, gt=0)
     tdoa_band_high_hz: float = Field(default=300_000.0, gt=0)
+    ml_enabled: bool = False
+    ml_model_path: Path | None = None
+    ml_manifest_path: Path | None = None
+    ml_max_emit_hz: float = Field(default=20.0, gt=0.0, le=100.0)
+    ml_background_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
+    ml_background_min_frames: int = Field(default=32, ge=4, le=100_000)
 
 
 class EdgeSettings(BaseModel):
@@ -48,12 +54,21 @@ class EdgeSettings(BaseModel):
     reconnect_max_seconds: float = 30.0
 
 
+class UISettings(BaseModel):
+    development_tab_enabled: bool = True
+    refresh_interval_ms: int = Field(default=75, ge=50, le=1000)
+
+
 def load_server_settings(path: str | Path | None) -> ServerSettings:
     return _load(path, "server", ServerSettings)
 
 
 def load_edge_settings(path: str | Path | None) -> EdgeSettings:
     return _load(path, "edge", EdgeSettings)
+
+
+def load_ui_settings(path: str | Path | None) -> UISettings:
+    return _load(path, "ui", UISettings)
 
 
 def _load(path, section, model_type):

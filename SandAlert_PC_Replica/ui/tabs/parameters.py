@@ -8,10 +8,11 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, 
                                QGroupBox, QFormLayout, QLineEdit, QPushButton, QLabel, QComboBox)
 from PySide6.QtCore import Qt
+from ui.tabs.development import DevelopmentTab
 
 class ParametersTab(QWidget):
     """标签页 B: 参数设置"""
-    def __init__(self, parent=None):
+    def __init__(self, development_enabled=True, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
         
@@ -22,6 +23,9 @@ class ParametersTab(QWidget):
         self.tab_output = QWidget()
         self.tab_calibration = QWidget()
         self.tab_system = QWidget()
+        self.development_tab = (
+            DevelopmentTab() if development_enabled else None
+        )
         
         self.setup_system_tab()
         self.setup_calibration_tab()
@@ -32,6 +36,8 @@ class ParametersTab(QWidget):
         self.inner_tabs.addTab(self.tab_relays, "Relays")
         self.inner_tabs.addTab(self.tab_display, "Display")
         self.inner_tabs.addTab(self.tab_output, "Output")
+        if self.development_tab is not None:
+            self.inner_tabs.addTab(self.development_tab, "开发测试")
         
         self.layout.addWidget(self.inner_tabs)
         

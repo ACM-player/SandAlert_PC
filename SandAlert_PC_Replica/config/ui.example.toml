@@ -1,0 +1,4 @@
+[ui]
+# 研究阶段默认显示；正式交付配置改为 false 即可隐藏。
+development_tab_enabled = true
+refresh_interval_ms = 75

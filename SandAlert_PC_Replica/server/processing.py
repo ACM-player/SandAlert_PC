@@ -7,14 +7,22 @@ import numpy as np
 
 from core.dsp_engine import DSPEngine
 from core.tdoa_engine import TDOAEngine
-from shared.contracts import AnalysisResult, WaveformMetadata
+from server.ml_shadow import ONNXShadowModel, ShadowInferenceEngine
+from shared.contracts import AnalysisResult, MLResult, MLStatus, WaveformMetadata
 from shared.settings import ServerSettings
+
+
+@dataclass(frozen=True)
+class ProcessingOutput:
+    analysis: AnalysisResult
+    ml_result: MLResult | None
 
 
 @dataclass
 class SessionProcessor:
     session_id: UUID
     settings: ServerSettings
+    ml_model: ONNXShadowModel
 
     def __post_init__(self) -> None:
         self.dsp = DSPEngine(sample_rate=self.settings.dsp_sample_rate)
@@ -34,10 +42,28 @@ class SessionProcessor:
         self.last_tdoa_timestamp_ns = 0
         self.impact_active = False
         self.quiet_frames = 0
+        self.current_fs_hz: int | None = None
+        self.last_signal_energy = 0.0
+        self.shadow = ShadowInferenceEngine(self.settings, self.ml_model)
+
+    def _set_sample_rate(self, fs_hz: int) -> None:
+        if self.current_fs_hz == fs_hz:
+            return
+        self.current_fs_hz = int(fs_hz)
+        self.dsp.set_sample_rate(fs_hz)
+        self.tdoa.fs = fs_hz
+        self.voltage.fill(0.0)
+        self.multichannel.fill(0.0)
+        self.samples_seen = 0
+        self.last_tdoa_timestamp_ns = 0
+        self.impact_active = False
+        self.quiet_frames = 0
+        self.shadow.reset(fs_hz)
 
     def process(self, meta: WaveformMetadata, data: np.ndarray) -> AnalysisResult:
         if data.ndim != 2:
             raise ValueError("waveform data must have shape (channels, samples)")
+        self._set_sample_rate(meta.fs_hz)
         shift = min(data.shape[1], self.window_len)
         ch1 = data[0, -shift:]
         self.voltage = np.roll(self.voltage, -shift)
@@ -52,6 +78,7 @@ class SessionProcessor:
             self.settings.threshold_margin,
             self.settings.calibration_factor,
         )
+        self.last_signal_energy = float(np.mean(np.square(processed)))
         dt = meta.samples / float(meta.fs_hz)
         self.cumulative_mass += float(mass_rate) * dt
 
@@ -89,7 +116,6 @@ class SessionProcessor:
             start = end - 2000
             if start >= 0:
                 slice_4ch = self.multichannel[:, start:end].copy()
-                self.tdoa.fs = meta.fs_hz
                 tdoa_result = self.tdoa.compute_doa_detailed(slice_4ch)
                 angle = float(tdoa_result.angle_deg)
                 cost = float(np.min(tdoa_result.cost_values))
@@ -120,11 +146,32 @@ class ProcessorRegistry:
     def __init__(self, settings: ServerSettings):
         self.settings = settings
         self._processors: dict[str, SessionProcessor] = {}
+        self._ml_model = ONNXShadowModel(settings)
 
-    def process(self, meta: WaveformMetadata, data: np.ndarray) -> AnalysisResult:
+    def ml_status(self) -> MLStatus:
+        return self._ml_model.status_event()
+
+    def _get_processor(self, meta: WaveformMetadata) -> SessionProcessor:
         key = str(meta.session_id)
         processor = self._processors.get(key)
         if processor is None:
-            processor = SessionProcessor(meta.session_id, self.settings)
+            processor = SessionProcessor(
+                meta.session_id, self.settings, self._ml_model
+            )
             self._processors[key] = processor
-        return processor.process(meta, data)
+        return processor
+
+    def process(self, meta: WaveformMetadata, data: np.ndarray) -> AnalysisResult:
+        return self._get_processor(meta).process(meta, data)
+
+    def process_detailed(
+        self, meta: WaveformMetadata, data: np.ndarray
+    ) -> ProcessingOutput:
+        processor = self._get_processor(meta)
+        analysis = processor.process(meta, data)
+        ml_result = None
+        if self.settings.ml_enabled:
+            ml_result = processor.shadow.process(
+                meta, data, analysis, processor.last_signal_energy
+            )
+        return ProcessingOutput(analysis=analysis, ml_result=ml_result)
