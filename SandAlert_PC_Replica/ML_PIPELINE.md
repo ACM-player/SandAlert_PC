@@ -10,6 +10,8 @@ field accuracy.
 - Server jobs: `/home/lks/miniconda3/envs/core/bin/python`
 - Current server training device: CPU. Do not install NVIDIA drivers or reboot
   the server during this phase.
+- `requirements/ml.txt` pins the official Linux CPU-only PyTorch wheel. A
+  dependency dry-run must contain no `cuda-*` or `nvidia-*` packages.
 
 ## Commands
 

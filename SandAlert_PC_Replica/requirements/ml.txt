@@ -1,8 +1,10 @@
 -r server.txt
 
-# CPU training and export. Install the CPU wheel from the official PyTorch
-# index while the server NVIDIA driver is unavailable.
-torch>=2.6,<3
+# This phase is CPU-only on Linux. The explicit official CPU build prevents
+# pip from pulling CUDA, cuDNN, NCCL or other NVIDIA runtime packages.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu; platform_system == "Linux"
+torch>=2.6,<3; platform_system == "Darwin"
 scikit-learn>=1.5,<2
 joblib>=1.4,<2
 onnx>=1.17,<2
