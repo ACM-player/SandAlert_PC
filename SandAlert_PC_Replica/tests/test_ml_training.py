@@ -59,6 +59,7 @@ def test_tcn_cpu_and_onnx_smoke(tmp_path):
     assert manifest["air_velocity_optional"] is True
     assert manifest["particle_size_input"] is False
     assert manifest["aux_feature_names"]
+    assert manifest["event_decision_threshold"] >= 0.5
 
     from server.ml_shadow import ONNXShadowModel
     from shared.settings import ServerSettings

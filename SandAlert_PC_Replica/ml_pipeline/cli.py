@@ -47,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
     tcn.add_argument("--workers", type=int, default=8)
     tcn.add_argument("--seed", type=int, default=42)
     tcn.add_argument("--energy-loss-weight", type=float, default=1.0)
+    tcn.add_argument(
+        "--event-target-fpr", type=float, default=0.05
+    )
 
     evaluate = subparsers.add_parser("evaluate-stress")
     evaluate.add_argument("--dataset", type=Path, required=True)
@@ -96,6 +99,7 @@ def main() -> None:
             workers=args.workers,
             seed=args.seed,
             energy_loss_weight=args.energy_loss_weight,
+            event_target_false_positive_rate=args.event_target_fpr,
         )
     else:
         result = evaluate_stress(

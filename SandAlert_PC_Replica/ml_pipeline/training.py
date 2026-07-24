@@ -15,10 +15,19 @@ from ml_pipeline.features import FEATURE_NAMES, extract_feature_matrix
 from shared.ml_features import AUX_FEATURE_NAMES, extract_shadow_aux_features
 
 
-def _metrics(y_true_event, probability, y_true_ips, ips_estimate, y_true_energy, energy):
+def _metrics(
+    y_true_event,
+    probability,
+    y_true_ips,
+    ips_estimate,
+    y_true_energy,
+    energy,
+    *,
+    event_threshold: float = 0.5,
+):
     from sklearn.metrics import average_precision_score, f1_score, mean_absolute_error
 
-    predicted_event = np.asarray(probability) >= 0.5
+    predicted_event = np.asarray(probability) >= event_threshold
     true_event = np.asarray(y_true_event, dtype=bool)
     event_classes = np.unique(y_true_event)
     true_positive = int(np.count_nonzero(predicted_event & true_event))
@@ -27,6 +36,7 @@ def _metrics(y_true_event, probability, y_true_ips, ips_estimate, y_true_energy,
     false_negative = int(np.count_nonzero(~predicted_event & true_event))
     return {
         "event_f1": float(f1_score(y_true_event, predicted_event, zero_division=0)),
+        "event_threshold": float(event_threshold),
         "event_average_precision": (
             float(average_precision_score(y_true_event, probability))
             if event_classes.size > 1
@@ -218,6 +228,7 @@ def train_tcn(
     workers: int = 8,
     seed: int = 42,
     energy_loss_weight: float = 1.0,
+    event_target_false_positive_rate: float = 0.05,
 ) -> dict:
     import torch
     from torch import nn
@@ -229,6 +240,8 @@ def train_tcn(
         raise ValueError("this phase is intentionally restricted to device='cpu'")
     if energy_loss_weight <= 0:
         raise ValueError("energy loss weight must be positive")
+    if not 0.0 <= event_target_false_positive_rate < 1.0:
+        raise ValueError("target false-positive rate must remain within [0, 1)")
     _seed_everything(seed)
     torch.manual_seed(seed)
     torch.set_num_threads(max(1, int(threads)))
@@ -347,7 +360,13 @@ def train_tcn(
     event_loss = nn.BCEWithLogitsLoss()
     regression_loss = nn.SmoothL1Loss()
 
-    def run_epoch(loader, train: bool):
+    def run_epoch(
+        loader,
+        train: bool,
+        *,
+        event_threshold: float = 0.5,
+        return_predictions: bool = False,
+    ):
         model.train(train)
         total = 0.0
         count = 0
@@ -418,8 +437,18 @@ def train_tcn(
             np.asarray(ips_estimates),
             np.asarray(energy_values),
             np.asarray(energy_estimates),
+            event_threshold=event_threshold,
         )
         metrics["loss"] = total / max(count, 1)
+        if return_predictions:
+            return metrics, {
+                "event": np.asarray(event_values),
+                "probability": np.asarray(probability_values),
+                "ips": np.asarray(ips_values),
+                "ips_estimate": np.asarray(ips_estimates),
+                "energy": np.asarray(energy_values),
+                "energy_estimate": np.asarray(energy_estimates),
+            }
         return metrics
 
     history = []
@@ -441,7 +470,48 @@ def train_tcn(
             }
     if best_state is not None:
         model.load_state_dict(best_state)
-    test_metrics = run_epoch(test_loader, train=False)
+    _, validation_predictions = run_epoch(
+        validation_loader, train=False, return_predictions=True
+    )
+    negative_probabilities = np.sort(
+        validation_predictions["probability"][
+            validation_predictions["event"] < 0.5
+        ]
+    )
+    if negative_probabilities.size:
+        allowed_false_positives = int(
+            np.floor(
+                event_target_false_positive_rate
+                * negative_probabilities.size
+            )
+        )
+        boundary_index = max(
+            negative_probabilities.size - allowed_false_positives - 1,
+            0,
+        )
+        event_decision_threshold = float(
+            np.nextafter(
+                negative_probabilities[boundary_index],
+                np.float32(np.inf),
+            )
+        )
+        event_decision_threshold = max(0.5, event_decision_threshold)
+    else:
+        event_decision_threshold = 0.5
+    calibrated_validation_metrics = _metrics(
+        validation_predictions["event"],
+        validation_predictions["probability"],
+        validation_predictions["ips"],
+        validation_predictions["ips_estimate"],
+        validation_predictions["energy"],
+        validation_predictions["energy_estimate"],
+        event_threshold=event_decision_threshold,
+    )
+    test_metrics = run_epoch(
+        test_loader,
+        train=False,
+        event_threshold=event_decision_threshold,
+    )
     test_rows = split_rows["test"]
     test_waveforms = load_waveforms(
         dataset_dir, [row["index"] for row in test_rows]
@@ -470,6 +540,7 @@ def train_tcn(
         "aux_mean": aux_mean,
         "aux_std": aux_std,
         "energy_residual_scale_db": energy_residual_scale_db,
+        "event_decision_threshold": event_decision_threshold,
     }, checkpoint_path)
 
     onnx_path = output_dir / "candidate.onnx"
@@ -517,6 +588,11 @@ def train_tcn(
         "epochs": epochs,
         "energy_mode": "analytic_residual",
         "energy_loss_weight": energy_loss_weight,
+        "event_decision_threshold": event_decision_threshold,
+        "event_target_false_positive_rate": (
+            event_target_false_positive_rate
+        ),
+        "calibrated_validation_metrics": calibrated_validation_metrics,
         "energy_residual_scale_db": energy_residual_scale_db,
         "aux_feature_names": list(AUX_FEATURE_NAMES),
         "aux_mean": aux_mean.tolist(),
@@ -538,6 +614,7 @@ def train_tcn(
         "model": model_id,
         "history": history,
         "test": test_metrics,
+        "calibrated_validation": calibrated_validation_metrics,
         "dsp_test": dsp_test_metrics,
         "promotion": promotion,
         "artifacts": {

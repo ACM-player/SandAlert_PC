@@ -34,7 +34,7 @@ nice -n 10 python -m ml_pipeline train-tcn \
   --dataset runtime/ml-data/software-v2 \
   --output runtime/ml-models/tcn-v2-weight1 \
   --device cpu --threads 32 --workers 8 \
-  --energy-loss-weight 1.0
+  --energy-loss-weight 1.0 --event-target-fpr 0.05
 
 python -m ml_pipeline evaluate-stress \
   --dataset runtime/ml-data/stress-v2 \
@@ -60,6 +60,10 @@ The ONNX model receives a normalized waveform plus observable auxiliary
 features. Its energy head predicts a correction to the analytic
 window/background ratio. Air velocity is optional and is always paired with a
 presence mask; particle size is not an input.
+
+The event decision threshold is calibrated only from in-domain validation
+negatives to meet the configured target false-positive rate. The frozen OOD
+suite is never used to choose that threshold.
 
 The stress dataset contains only unseen, high-severity disturbance families.
 Operational metrics report both raw predictions and accepted-only predictions,

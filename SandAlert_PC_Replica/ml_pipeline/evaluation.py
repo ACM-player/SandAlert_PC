@@ -20,6 +20,8 @@ def _subset_metrics(
     probability: np.ndarray,
     ips: np.ndarray,
     energy: np.ndarray,
+    *,
+    event_threshold: float = 0.5,
 ) -> dict | None:
     if not np.any(indices):
         return None
@@ -40,6 +42,7 @@ def _subset_metrics(
         ips[selected],
         target_energy,
         energy[selected],
+        event_threshold=event_threshold,
     )
 
 
@@ -255,6 +258,7 @@ def evaluate_stress(
                 tcn_ips,
                 target_energy,
                 tcn_energy,
+                event_threshold=runtime.event_decision_threshold,
             ),
             "tcn_accepted": _subset_metrics(
                 rows,
@@ -262,6 +266,7 @@ def evaluate_stress(
                 tcn_probability,
                 tcn_ips,
                 tcn_energy,
+                event_threshold=runtime.event_decision_threshold,
             ),
         },
         "rejection": {
@@ -296,6 +301,10 @@ def evaluate_stress(
                 np.mean(np.abs(target_energy - tcn_energy_without_air))
             ),
         },
+        "event_decision": {
+            "threshold": runtime.event_decision_threshold,
+            "source": "in_domain_validation_negative_quantile",
+        },
         "per_scenario": {},
         "limitations": [
             "All inputs and labels are synthetic.",
@@ -326,10 +335,20 @@ def evaluate_stress(
                 rows, mask, feature_probability, feature_ips, feature_energy
             ),
             "tcn_raw": _subset_metrics(
-                rows, mask, tcn_probability, tcn_ips, tcn_energy
+                rows,
+                mask,
+                tcn_probability,
+                tcn_ips,
+                tcn_energy,
+                event_threshold=runtime.event_decision_threshold,
             ),
             "tcn_accepted": _subset_metrics(
-                rows, mask & accepted, tcn_probability, tcn_ips, tcn_energy
+                rows,
+                mask & accepted,
+                tcn_probability,
+                tcn_ips,
+                tcn_energy,
+                event_threshold=runtime.event_decision_threshold,
             ),
             "coverage": float(np.mean(accepted[mask])),
         }

@@ -33,6 +33,7 @@ class ONNXShadowModel:
         self.aux_feature_names: list[str] = []
         self.aux_mean = np.empty(0, dtype=np.float32)
         self.aux_std = np.empty(0, dtype=np.float32)
+        self.event_decision_threshold = 0.5
         self.reason = ""
         if settings.ml_enabled:
             self._load()
@@ -79,6 +80,9 @@ class ONNXShadowModel:
             )
             self.aux_std = np.asarray(
                 manifest.get("aux_std") or [], dtype=np.float32
+            )
+            self.event_decision_threshold = float(
+                manifest.get("event_decision_threshold") or 0.5
             )
         except Exception as exc:  # onnxruntime exposes provider-specific errors
             self.session = None
