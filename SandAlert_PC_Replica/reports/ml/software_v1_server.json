@@ -1,0 +1,68 @@
+{
+  "report_version": 1,
+  "generated_at": "2026-07-24",
+  "scope": "synthetic_holdout_only",
+  "dataset": {
+    "name": "software-v1",
+    "seed": 20260724,
+    "sample_rate_hz": 2000000,
+    "window_samples": 8192,
+    "channels": 1,
+    "windows": 900,
+    "splits": {
+      "train": 680,
+      "validation": 65,
+      "test": 155
+    }
+  },
+  "server": {
+    "python": "3.10.20",
+    "torch": "2.13.0+cpu",
+    "cuda_available": false,
+    "training_device": "cpu",
+    "threads": 32,
+    "workers": 8,
+    "nice": 10
+  },
+  "feature_baseline_test": {
+    "event_f1": 0.9850746268656716,
+    "event_average_precision": 0.9997868712702471,
+    "ips_mae": 195.3125,
+    "relative_energy_mae_db": 1.9869600164412025
+  },
+  "tcn_test": {
+    "model_id": "sandalert-tcn-v1-seed42",
+    "epochs": 10,
+    "event_f1": 0.9253731343283582,
+    "event_average_precision": 0.9835791178941856,
+    "ips_mae": 138.50927734375,
+    "relative_energy_mae_db": 26.286840438842773
+  },
+  "dsp_test": {
+    "event_f1": 0.75,
+    "event_average_precision": 0.6060404807084124,
+    "ips_mae": 24009.261592741936,
+    "relative_energy_mae_db": 43.26521047311862
+  },
+  "shadow_gate": {
+    "eligible": true,
+    "event_f1_not_worse": true,
+    "ips_mae_not_worse": true,
+    "event_f1_relative_gain": 0.2338308457711443,
+    "ips_mae_relative_gain": 0.9942310063635768,
+    "required_relative_gain": 0.1,
+    "scope": "synthetic_holdout_only"
+  },
+  "onnx": {
+    "status": "exported",
+    "size_kib": 472,
+    "sha256": "0363827610c31582934488e061baeaa6e3e4abb093afb4e5eda00f5fb9a39ebd",
+    "cpu_mean_latency_ms_100_runs": 0.5278098955750465
+  },
+  "limitations": [
+    "The results only validate the software and synthetic training path.",
+    "No claim is made about calibrated field accuracy or real g/s accuracy.",
+    "The TCN relative-energy head remains substantially weaker than the feature baseline.",
+    "Real AE sensor data and gravimetric gas-solid bench labels are still required."
+  ]
+}
