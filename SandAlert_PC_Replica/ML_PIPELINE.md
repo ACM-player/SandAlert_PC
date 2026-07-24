@@ -41,6 +41,7 @@ python -m ml_pipeline evaluate-stress \
   --feature-model runtime/ml-reports/feature-v2/feature_baseline.joblib \
   --onnx runtime/ml-models/tcn-v2-weight1/candidate.onnx \
   --manifest runtime/ml-models/tcn-v2-weight1/candidate.manifest.json \
+  --reference-dataset runtime/ml-data/software-v2 \
   --output runtime/ml-reports/stress-v2.json
 ```
 

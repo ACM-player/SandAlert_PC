@@ -43,6 +43,64 @@ def _subset_metrics(
     )
 
 
+def _quality_gate_summary(
+    rows: list[dict],
+    waveforms: np.ndarray,
+    fs_hz: int,
+    quality_engine: ShadowInferenceEngine,
+) -> dict:
+    accepted = []
+    hard_corruption = []
+    flags_counter: Counter[str] = Counter()
+    scenario_total: Counter[str] = Counter()
+    scenario_accepted: Counter[str] = Counter()
+    settings = quality_engine.settings
+    for row, waveform in zip(rows, waveforms):
+        air_velocity = (
+            row.get("air_velocity_m_s")
+            if row.get("air_velocity_available", False)
+            else None
+        )
+        features = extract_shadow_aux_features(
+            waveform[0],
+            fs_hz,
+            row["analytic_relative_energy_db"],
+            air_velocity,
+        )
+        flags = quality_engine._quality_flags(features)
+        is_accepted = not flags
+        accepted.append(is_accepted)
+        flags_counter.update(flags)
+        scenario_total[row["scenario"]] += 1
+        if is_accepted:
+            scenario_accepted[row["scenario"]] += 1
+        hard_corruption.append(
+            row.get("clipping_fraction", 0.0)
+            > settings.ml_max_clipping_fraction
+            or row.get("dropout_fraction", 0.0)
+            > settings.ml_max_dropout_fraction
+        )
+    accepted_array = np.asarray(accepted, dtype=bool)
+    corruption_array = np.asarray(hard_corruption, dtype=bool)
+    return {
+        "coverage": float(np.mean(accepted_array)),
+        "rejected": int(np.count_nonzero(~accepted_array)),
+        "quality_flags": dict(flags_counter),
+        "hard_corruption_recall": float(
+            np.mean(~accepted_array[corruption_array])
+        ) if np.any(corruption_array) else None,
+        "clean_or_nonhard_false_rejection_rate": float(
+            np.mean(~accepted_array[~corruption_array])
+        ) if np.any(~corruption_array) else None,
+        "scenario_coverage": {
+            scenario: (
+                scenario_accepted[scenario] / max(scenario_total[scenario], 1)
+            )
+            for scenario in sorted(scenario_total)
+        },
+    }
+
+
 def evaluate_stress(
     dataset_dir: str | Path,
     feature_model_path: str | Path,
@@ -51,6 +109,7 @@ def evaluate_stress(
     output_path: str | Path,
     *,
     settings: ServerSettings | None = None,
+    reference_dataset_dir: str | Path | None = None,
 ) -> dict:
     """Evaluate DSP, feature and TCN models on a frozen OOD dataset."""
     from joblib import load
@@ -244,6 +303,18 @@ def evaluate_stress(
             "No field g/s accuracy claim is permitted.",
         ],
     }
+    if reference_dataset_dir is not None:
+        reference_rows = load_manifest(reference_dataset_dir)
+        reference_waveforms = load_waveforms(
+            reference_dataset_dir,
+            [int(row["index"]) for row in reference_rows],
+        )
+        report["reference_quality_gate"] = _quality_gate_summary(
+            reference_rows,
+            reference_waveforms,
+            int(reference_rows[0]["sample_rate_hz"]),
+            quality_engine,
+        )
     for scenario in sorted(per_scenario_total):
         mask = np.asarray([row["scenario"] == scenario for row in rows])
         report["per_scenario"][scenario] = {

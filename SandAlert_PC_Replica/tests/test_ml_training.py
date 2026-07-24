@@ -114,8 +114,10 @@ def test_ood_stress_evaluation_smoke(tmp_path):
         tcn / "candidate.onnx",
         tcn / "candidate.manifest.json",
         tmp_path / "stress_report.json",
+        reference_dataset_dir=dataset,
     )
     assert report["scope"] == "synthetic_ood_stress_only"
     assert report["dataset"]["samples"] == 60
     assert 0.0 <= report["rejection"]["coverage"] <= 1.0
     assert report["air_velocity_ablation"]["available_fraction"] > 0.0
+    assert 0.0 <= report["reference_quality_gate"]["coverage"] <= 1.0

@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--onnx", type=Path, required=True)
     evaluate.add_argument("--manifest", type=Path, required=True)
     evaluate.add_argument("--output", type=Path, required=True)
+    evaluate.add_argument("--reference-dataset", type=Path)
     return parser
 
 
@@ -103,6 +104,7 @@ def main() -> None:
             args.onnx,
             args.manifest,
             args.output,
+            reference_dataset_dir=args.reference_dataset,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -19,7 +19,12 @@ def _metrics(y_true_event, probability, y_true_ips, ips_estimate, y_true_energy,
     from sklearn.metrics import average_precision_score, f1_score, mean_absolute_error
 
     predicted_event = np.asarray(probability) >= 0.5
+    true_event = np.asarray(y_true_event, dtype=bool)
     event_classes = np.unique(y_true_event)
+    true_positive = int(np.count_nonzero(predicted_event & true_event))
+    false_positive = int(np.count_nonzero(predicted_event & ~true_event))
+    true_negative = int(np.count_nonzero(~predicted_event & ~true_event))
+    false_negative = int(np.count_nonzero(~predicted_event & true_event))
     return {
         "event_f1": float(f1_score(y_true_event, predicted_event, zero_division=0)),
         "event_average_precision": (
@@ -27,6 +32,18 @@ def _metrics(y_true_event, probability, y_true_ips, ips_estimate, y_true_energy,
             if event_classes.size > 1
             else None
         ),
+        "false_positive_rate": float(
+            false_positive / max(false_positive + true_negative, 1)
+        ),
+        "false_negative_rate": float(
+            false_negative / max(false_negative + true_positive, 1)
+        ),
+        "confusion": {
+            "true_positive": true_positive,
+            "false_positive": false_positive,
+            "true_negative": true_negative,
+            "false_negative": false_negative,
+        },
         "ips_mae": float(mean_absolute_error(y_true_ips, ips_estimate)),
         "relative_energy_mae_db": float(
             mean_absolute_error(y_true_energy, energy)
