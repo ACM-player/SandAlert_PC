@@ -11,6 +11,7 @@ SCENARIOS = (
     "clean",
     "background",
     "low_snr",
+    "mechanical_noise",
     "gain_shift",
     "resonance_shift",
     "multipath",
@@ -195,6 +196,8 @@ def generate_window(
     )
     if scenario == "low_snr":
         noise_rms *= 2.0 + 4.0 * severity
+    elif scenario == "mechanical_noise":
+        noise_rms *= 1.5 + 2.0 * severity
     elif scenario in {"mechanical_interference", "compound_extreme"}:
         noise_rms *= 3.0 + 8.0 * severity
     white = rng.normal(0.0, noise_rms, config.window_samples)
@@ -205,14 +208,21 @@ def generate_window(
     )
     background = white + flow * noise_rms * rng.uniform(0.25, 1.5) * air_scale
 
-    if scenario in {"mechanical_interference", "compound_extreme"}:
+    if scenario in {
+        "mechanical_noise",
+        "mechanical_interference",
+        "compound_extreme",
+    }:
+        mechanical_strength = (
+            severity * 0.35 if scenario == "mechanical_noise" else severity
+        )
         t = np.arange(config.window_samples, dtype=float) / config.sample_rate_hz
         fundamental = rng.uniform(600.0, 8_000.0)
         mechanical = np.zeros(config.window_samples, dtype=float)
         for harmonic in range(1, 5):
             mechanical += (
                 noise_rms
-                * severity
+                * mechanical_strength
                 * rng.uniform(1.0, 4.0)
                 / harmonic
                 * np.sin(
@@ -220,11 +230,15 @@ def generate_window(
                     + rng.uniform(0.0, 2.0 * math.pi)
                 )
             )
-        for _ in range(1 + int(4 * severity)):
+        for _ in range(1 + int(4 * mechanical_strength)):
             start = int(rng.integers(0, max(1, config.window_samples - 16)))
             length = int(rng.integers(8, min(160, config.window_samples - start) + 1))
             mechanical[start:start + length] += (
-                rng.normal(0.0, noise_rms * (4.0 + 12.0 * severity), length)
+                rng.normal(
+                    0.0,
+                    noise_rms * (2.0 + 12.0 * mechanical_strength),
+                    length,
+                )
                 * np.hanning(length)
             )
         background += mechanical
