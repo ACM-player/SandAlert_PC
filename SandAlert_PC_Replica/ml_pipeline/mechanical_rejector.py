@@ -41,9 +41,10 @@ def train_mechanical_rejector(
     seed: int = 42,
     max_positive_false_rejection_rate: float = 0.05,
     max_ordinary_negative_false_rejection_rate: float = 0.05,
+    rbf_c: float = 4.0,
 ) -> dict:
     """Train Route B without introducing scikit-learn into server runtime."""
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.svm import SVC
 
     dataset_dir = Path(dataset_dir)
     output_dir = Path(output_dir)
@@ -55,6 +56,8 @@ def train_mechanical_rejector(
         raise ValueError("rejector requires an adversarial training dataset")
     if summary.get("frozen_ood_used") is not False:
         raise ValueError("training summary does not prove frozen OOD isolation")
+    if rbf_c <= 0:
+        raise ValueError("RBF regularization C must be positive")
     rows = load_manifest(dataset_dir)
     waveforms = load_waveforms(
         dataset_dir, [int(row["index"]) for row in rows]
@@ -83,13 +86,15 @@ def train_mechanical_rejector(
         -normalized_clip,
         normalized_clip,
     )
-    classifier = LogisticRegression(
+    classifier = SVC(
+        C=rbf_c,
         class_weight="balanced",
-        max_iter=2_000,
         random_state=seed,
-        solver="liblinear",
+        kernel="rbf",
+        gamma="scale",
     ).fit(normalized[train_mask], target[train_mask])
-    probabilities = classifier.predict_proba(normalized)[:, 1]
+    decision = np.clip(classifier.decision_function(normalized), -40.0, 40.0)
+    probabilities = 1.0 / (1.0 + np.exp(-decision))
     threshold, calibration_metrics = _calibrate_rejection_threshold(
         target[validation_mask],
         probabilities[validation_mask],
@@ -106,12 +111,15 @@ def train_mechanical_rejector(
     )
     artifact = {
         "model_id": model_id,
-        "model_type": "standardized_logistic_regression",
+        "model_type": "standardized_rbf_svm",
         "feature_names": list(MECHANICAL_REJECTOR_FEATURE_NAMES),
         "mean": mean.tolist(),
         "scale": scale.tolist(),
-        "coefficients": classifier.coef_.reshape(-1).tolist(),
+        "support_vectors": classifier.support_vectors_.tolist(),
+        "dual_coefficients": classifier.dual_coef_.reshape(-1).tolist(),
         "intercept": float(classifier.intercept_[0]),
+        "gamma": float(classifier._gamma),
+        "rbf_c": float(rbf_c),
         "decision_threshold": threshold,
         "normalized_clip": normalized_clip,
         "sample_rate_hz": fs_hz,

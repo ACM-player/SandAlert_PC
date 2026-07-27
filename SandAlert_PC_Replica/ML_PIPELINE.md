@@ -91,8 +91,10 @@ python -m ml_pipeline merge-adversarial \
 
 Each mechanical group contains interference-only hard negatives and
 mechanical-plus-sand positive controls. Route A adds a TCN quality head and
-mechanical envelope-shape features. Route B uses a dedicated portable
-logistic prefilter and an adversarially trained TCN:
+mechanical envelope-shape features. Route B uses a dedicated portable RBF
+prefilter and an adversarially trained TCN. The support vectors are exported
+to JSON and evaluated with NumPy, so the online server does not acquire a
+scikit-learn runtime dependency:
 
 ```bash
 nice -n 10 python -m ml_pipeline train-tcn \

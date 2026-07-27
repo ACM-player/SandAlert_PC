@@ -99,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
     )
+    rejector.add_argument("--rbf-c", type=float, default=4.0)
 
     evaluate = subparsers.add_parser("evaluate-stress")
     evaluate.add_argument("--dataset", type=Path, required=True)
@@ -213,6 +214,7 @@ def main() -> None:
             max_ordinary_negative_false_rejection_rate=(
                 args.max_ordinary_negative_false_rejection
             ),
+            rbf_c=args.rbf_c,
         )
     elif args.command == "evaluate-stress":
         result = evaluate_stress(
