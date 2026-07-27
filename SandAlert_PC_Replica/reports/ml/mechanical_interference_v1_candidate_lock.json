@@ -1,0 +1,109 @@
+{
+  "lock_version": 1,
+  "created_at_utc": "2026-07-27T11:13:06.334756+00:00",
+  "selection_scope": "mechanical_calibration_only",
+  "calibration_dataset_fingerprint": "15d6bfbd8d9a8f721978016e6f6ed0ab5ef1bf4fdb6a8740f489142100ff1cd2",
+  "frozen_ood_path_seen_during_lock": false,
+  "criteria_locked_before_frozen_evaluation": {
+    "mechanical_false_positive_rate_strictly_below": 0.2,
+    "mechanical_false_negative_rate_maximum": 0.25,
+    "maximum_fnr_increase_over_route_raw": 0.05
+  },
+  "route_a": {
+    "description": "TCN quality head plus adversarial event training",
+    "model_id": "sandalert-tcn-v3-quality-software-v21-mechanical-v1-energy-residual-seed42",
+    "onnx": {
+      "path": "/home/lks/project/SandAlert_PC_ml_robustness/SandAlert_PC_Replica/runtime/ml-models/mechanical-route-a-v1/candidate.onnx",
+      "sha256": "5732de29d5d90d58447eef49f79a748200d9afd6e29dabafc27b0c85d451401b"
+    },
+    "manifest": {
+      "path": "/home/lks/project/SandAlert_PC_ml_robustness/SandAlert_PC_Replica/runtime/ml-models/mechanical-route-a-v1/candidate.manifest.json",
+      "sha256": "d09515f5ae973bc91c8d3212f1977db2ef7586a3f42a8ab0b78b21669e0d4e9c"
+    },
+    "calibration_evidence": {
+      "quality_calibration": {
+        "threshold": 0.9629983305931092,
+        "hard_negative_recall": 0.4375,
+        "positive_false_rejection_rate": 0.044444444444444446,
+        "ordinary_negative_false_rejection_rate": 0.0,
+        "coverage": 0.8838709677419355,
+        "rejected": 18,
+        "constraints": {
+          "max_positive_false_rejection_rate": 0.05,
+          "max_ordinary_negative_false_rejection_rate": 0.05
+        }
+      },
+      "adversarial_holdout": {
+        "event_f1": 0.8945454545454545,
+        "event_threshold": 0.5,
+        "event_average_precision": 0.9783764586213342,
+        "false_positive_rate": 0.016,
+        "false_negative_rate": 0.18,
+        "confusion": {
+          "true_positive": 123,
+          "false_positive": 2,
+          "true_negative": 123,
+          "false_negative": 27
+        },
+        "ips_mae": 138.9923553466797,
+        "relative_energy_mae_db": 0.1232190802693367,
+        "loss": 1.3234454068270596,
+        "quality_head": {
+          "threshold": 0.9629983305931092,
+          "hard_negative_recall": 0.6136363636363636,
+          "positive_false_rejection_rate": 0.04,
+          "ordinary_negative_false_rejection_rate": 0.0,
+          "coverage": 0.88,
+          "rejected": 33
+        }
+      }
+    }
+  },
+  "route_b": {
+    "description": "dedicated mechanical prefilter plus adversarial TCN",
+    "model_id": "sandalert-tcn-v2-software-v21-mechanical-v1-energy-residual-seed42",
+    "rejector_model_id": "sandalert-mechanical-rejector-v1-software-v21-mechanical-v1-seed42",
+    "onnx": {
+      "path": "/home/lks/project/SandAlert_PC_ml_robustness/SandAlert_PC_Replica/runtime/ml-models/mechanical-route-b-v1/candidate.onnx",
+      "sha256": "7feb28310194b553d01b258d32a2a544d8a98971598eb5c996743e025d57329b"
+    },
+    "manifest": {
+      "path": "/home/lks/project/SandAlert_PC_ml_robustness/SandAlert_PC_Replica/runtime/ml-models/mechanical-route-b-v1/candidate.manifest.json",
+      "sha256": "eaf8baa34a0f98795a361990e84b7f469570988ed01f77049891a7f15bfb66bb"
+    },
+    "rejector": {
+      "path": "/home/lks/project/SandAlert_PC_ml_robustness/SandAlert_PC_Replica/runtime/ml-models/mechanical-rejector-rbf-v1/mechanical_rejector.json",
+      "sha256": "bcf887bc6589612e0744e886532b758ad78b17f16a6c2308306a7392e0602ead"
+    },
+    "calibration_evidence": {
+      "tcn_adversarial_holdout": {
+        "event_f1": 0.8759124087591241,
+        "event_threshold": 0.5,
+        "event_average_precision": 0.9682814239479016,
+        "false_positive_rate": 0.032,
+        "false_negative_rate": 0.2,
+        "confusion": {
+          "true_positive": 120,
+          "false_positive": 4,
+          "true_negative": 121,
+          "false_negative": 30
+        },
+        "ips_mae": 132.4976043701172,
+        "relative_energy_mae_db": 0.0977916270494461,
+        "loss": 1.089873021732677
+      },
+      "prefilter_calibration": {
+        "threshold": 0.7959413649291158,
+        "hard_negative_recall": 0.3125,
+        "positive_false_rejection_rate": 0.044444444444444446,
+        "ordinary_negative_false_rejection_rate": 0.0,
+        "coverage": 0.9096774193548387,
+        "rejected": 14,
+        "constraints": {
+          "max_positive_false_rejection_rate": 0.05,
+          "max_ordinary_negative_false_rejection_rate": 0.05
+        }
+      }
+    }
+  }
+}
