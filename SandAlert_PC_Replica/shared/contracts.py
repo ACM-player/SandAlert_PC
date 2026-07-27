@@ -103,6 +103,10 @@ class MLResult(StrictModel):
     ml_relative_energy_db: float | None = None
     background_energy: float | None = Field(default=None, ge=0.0)
     inference_latency_ms: float | None = Field(default=None, ge=0.0)
+    interference_probability: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    interference_route: Literal["quality_head", "prefilter"] | None = None
     quality_flags: list[str] = Field(default_factory=list)
     coalesced_windows: int = Field(default=0, ge=0)
 

@@ -29,7 +29,16 @@ OOD_SCENARIOS = (
     "compound_extreme",
 )
 
-ALL_SCENARIOS = SCENARIOS + OOD_SCENARIOS
+MECHANICAL_CALIBRATION_SCENARIOS = (
+    "mechanical_tap",
+    "valve_harmonic",
+    "pump_vibration",
+    "mechanical_mixed",
+)
+
+ALL_SCENARIOS = (
+    SCENARIOS + OOD_SCENARIOS + MECHANICAL_CALIBRATION_SCENARIOS
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +159,191 @@ def _single_impact(
     return (amplitude * envelope * carrier).astype(np.float32)
 
 
+def _mechanical_tap(
+    rng: np.random.Generator,
+    config: SimulationConfig,
+    severity: float,
+) -> tuple[np.ndarray, dict]:
+    """Synthesize structural knocks that are not sand-impact labels.
+
+    The deliberately slower attack, modal beating and long decay differ from
+    the fast single-mode sand pulses while still occupying overlapping bands.
+    """
+    samples = config.window_samples
+    fs_hz = config.sample_rate_hz
+    signal = np.zeros(samples, dtype=np.float64)
+    tap_count = 1 + int(rng.random() < 0.25 + 0.55 * severity)
+    rise_samples_values = []
+    decay_samples_values = []
+    for _ in range(tap_count):
+        margin = max(32, samples // 50)
+        onset = int(rng.integers(margin, max(margin + 1, samples - margin)))
+        rise_us = rng.uniform(12.0, 85.0) * (0.8 + 0.7 * severity)
+        decay_us = rng.uniform(350.0, 1_800.0) * (0.8 + 0.6 * severity)
+        rise_samples = max(2, int(round(rise_us * 1e-6 * fs_hz)))
+        decay_samples = max(8, int(round(decay_us * 1e-6 * fs_hz)))
+        duration = min(samples - onset, rise_samples + 6 * decay_samples)
+        if duration <= 2:
+            continue
+        t = np.arange(duration, dtype=np.float64) / fs_hz
+        attack = np.minimum(
+            np.arange(duration, dtype=np.float64) / max(rise_samples, 1),
+            1.0,
+        )
+        decay_t = np.maximum(
+            np.arange(duration, dtype=np.float64) - rise_samples,
+            0.0,
+        ) / fs_hz
+        envelope = attack * np.exp(
+            -decay_t / max(decay_us * 1e-6, 1.0 / fs_hz)
+        )
+        base_frequency = rng.uniform(18_000.0, 115_000.0)
+        overlapping_mode = min(
+            fs_hz * 0.44,
+            base_frequency * rng.uniform(1.35, 2.6),
+        )
+        phase = rng.uniform(0.0, 2.0 * math.pi)
+        modal = np.sin(2.0 * math.pi * base_frequency * t + phase)
+        modal += rng.uniform(0.35, 0.85) * np.sin(
+            2.0 * math.pi * overlapping_mode * t + phase * 0.37
+        )
+        modal *= 1.0 + rng.uniform(0.08, 0.35) * np.sin(
+            2.0 * math.pi * rng.uniform(300.0, 2_500.0) * t
+        )
+        amplitude = rng.uniform(0.025, 0.28) * (0.5 + severity)
+        signal[onset:onset + duration] += amplitude * envelope * modal
+        rise_samples_values.append(rise_samples)
+        decay_samples_values.append(decay_samples)
+    return signal, {
+        "mechanical_tap_count": tap_count,
+        "mechanical_rise_samples": (
+            float(np.mean(rise_samples_values)) if rise_samples_values else 0.0
+        ),
+        "mechanical_decay_samples": (
+            float(np.mean(decay_samples_values)) if decay_samples_values else 0.0
+        ),
+    }
+
+
+def _valve_harmonic(
+    rng: np.random.Generator,
+    config: SimulationConfig,
+    severity: float,
+) -> tuple[np.ndarray, dict]:
+    samples = config.window_samples
+    fs_hz = config.sample_rate_hz
+    t = np.arange(samples, dtype=np.float64) / fs_hz
+    fundamental = rng.uniform(700.0, 7_500.0)
+    signal = np.zeros(samples, dtype=np.float64)
+    phase = rng.uniform(0.0, 2.0 * math.pi)
+    for harmonic in range(1, 9):
+        signal += (
+            rng.uniform(0.002, 0.012)
+            * (0.45 + severity)
+            / math.sqrt(harmonic)
+            * np.sin(
+                2.0 * math.pi * fundamental * harmonic * t
+                + phase * harmonic
+            )
+        )
+    switching_rate = rng.uniform(60.0, 420.0)
+    modulation = 0.55 + 0.45 * np.sign(
+        np.sin(2.0 * math.pi * switching_rate * t + phase)
+    )
+    signal *= modulation
+    transient_count = 1 + int(3 * severity)
+    for _ in range(transient_count):
+        start = int(rng.integers(0, max(1, samples - 32)))
+        length = int(rng.integers(16, min(300, samples - start) + 1))
+        carrier_hz = rng.uniform(35_000.0, 180_000.0)
+        transient_t = np.arange(length, dtype=np.float64) / fs_hz
+        envelope = np.exp(
+            -transient_t / rng.uniform(100e-6, 650e-6)
+        )
+        signal[start:start + length] += (
+            rng.uniform(0.01, 0.12)
+            * (0.5 + severity)
+            * envelope
+            * np.sin(2.0 * math.pi * carrier_hz * transient_t)
+        )
+    return signal, {
+        "mechanical_fundamental_hz": float(fundamental),
+        "mechanical_transient_count": transient_count,
+    }
+
+
+def _pump_vibration(
+    rng: np.random.Generator,
+    config: SimulationConfig,
+    severity: float,
+) -> tuple[np.ndarray, dict]:
+    samples = config.window_samples
+    fs_hz = config.sample_rate_hz
+    t = np.arange(samples, dtype=np.float64) / fs_hz
+    shaft_hz = rng.uniform(18.0, 95.0)
+    blade_count = int(rng.integers(3, 9))
+    blade_hz = shaft_hz * blade_count
+    signal = np.zeros(samples, dtype=np.float64)
+    for harmonic in range(1, 13):
+        frequency = blade_hz * harmonic
+        if frequency >= fs_hz * 0.45:
+            break
+        signal += (
+            rng.uniform(0.0015, 0.009)
+            * (0.55 + severity)
+            / harmonic ** 0.7
+            * np.sin(
+                2.0 * math.pi * frequency * t
+                + rng.uniform(0.0, 2.0 * math.pi)
+            )
+        )
+    cavitation = _colored_noise(
+        rng,
+        samples,
+        fs_hz,
+        cutoff_hz=rng.uniform(25_000.0, 90_000.0),
+    )
+    modulation = 0.35 + 0.65 * np.square(
+        np.sin(2.0 * math.pi * blade_hz * t + rng.uniform(0.0, math.pi))
+    )
+    signal += (
+        cavitation
+        * modulation
+        * rng.uniform(0.002, 0.018)
+        * severity
+    )
+    return signal, {
+        "mechanical_shaft_hz": float(shaft_hz),
+        "mechanical_blade_count": blade_count,
+        "mechanical_blade_hz": float(blade_hz),
+    }
+
+
+def _mechanical_artifact(
+    rng: np.random.Generator,
+    config: SimulationConfig,
+    scenario: str,
+    severity: float,
+) -> tuple[np.ndarray, dict]:
+    components: list[tuple[np.ndarray, dict]] = []
+    if scenario in {"mechanical_tap", "mechanical_mixed"}:
+        components.append(_mechanical_tap(rng, config, severity))
+    if scenario in {"valve_harmonic", "mechanical_mixed"}:
+        components.append(_valve_harmonic(rng, config, severity))
+    if scenario in {"pump_vibration", "mechanical_mixed"}:
+        components.append(_pump_vibration(rng, config, severity))
+    if not components:
+        return np.zeros(config.window_samples, dtype=np.float64), {}
+    signal = np.sum([item[0] for item in components], axis=0)
+    diagnostics = {}
+    for _, values in components:
+        diagnostics.update(values)
+    diagnostics["mechanical_artifact_rms"] = float(
+        np.sqrt(np.mean(np.square(signal)))
+    )
+    return signal, diagnostics
+
+
 def _delayed_channel(
     source: np.ndarray,
     delay_samples: float,
@@ -242,6 +436,13 @@ def generate_window(
                 * np.hanning(length)
             )
         background += mechanical
+
+    mechanical_diagnostics: dict = {}
+    if scenario in MECHANICAL_CALIBRATION_SCENARIOS:
+        artifact, mechanical_diagnostics = _mechanical_artifact(
+            rng, config, scenario, severity
+        )
+        background += artifact
 
     impact = np.zeros(config.window_samples, dtype=np.float32)
     events = _event_times(
@@ -415,6 +616,10 @@ def generate_window(
         "clipping_fraction": clipping_fraction,
         "dropout_fraction": dropout_fraction,
         "signal_plus_noise_energy": signal_plus_noise,
+        "mechanical_interference_type": (
+            scenario if scenario in MECHANICAL_CALIBRATION_SCENARIOS else None
+        ),
+        **mechanical_diagnostics,
         "config": asdict(config),
     }
     return SyntheticWindow(waveform=channels, labels=labels)

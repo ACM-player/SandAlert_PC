@@ -180,12 +180,22 @@ def evaluate_stress(
             fs_hz,
             row["analytic_relative_energy_db"],
             air_velocity,
+            feature_names=(
+                tuple(runtime.aux_feature_names)
+                if runtime.aux_feature_names
+                else None
+            ),
         )
         no_air_aux = extract_shadow_aux_features(
             raw,
             fs_hz,
             row["analytic_relative_energy_db"],
             None,
+            feature_names=(
+                tuple(runtime.aux_feature_names)
+                if runtime.aux_feature_names
+                else None
+            ),
         )
         flags = quality_engine._quality_flags(actual_aux)
         is_accepted = not flags

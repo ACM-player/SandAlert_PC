@@ -17,6 +17,8 @@ tdoa_band_high_hz = 300000.0
 ml_enabled = false
 ml_model_path = "./runtime/ml-models/candidate.onnx"
 ml_manifest_path = "./runtime/ml-models/candidate.manifest.json"
+# Route B 专用机械干扰前置拒绝器；不配置时完全不启用。
+# ml_mechanical_rejector_path = "./runtime/ml-models/mechanical_rejector.json"
 ml_max_emit_hz = 20.0
 ml_background_seconds = 1.0
 ml_background_min_frames = 32

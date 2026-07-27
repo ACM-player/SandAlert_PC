@@ -30,9 +30,15 @@ class ResidualTemporalBlock(nn.Module):
 class SandAlertTCN(nn.Module):
     """Compact CPU-friendly multi-task 1-D temporal convolutional network."""
 
-    def __init__(self, aux_feature_count: int = 0):
+    def __init__(
+        self,
+        aux_feature_count: int = 0,
+        *,
+        quality_head_enabled: bool = False,
+    ):
         super().__init__()
         self.aux_feature_count = int(aux_feature_count)
+        self.quality_head_enabled = bool(quality_head_enabled)
         self.stem = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=15, stride=4, padding=7),
             nn.BatchNorm1d(16),
@@ -67,6 +73,9 @@ class SandAlertTCN(nn.Module):
         self.event_head = nn.Linear(64, 1)
         self.ips_head = nn.Linear(64, 1)
         self.energy_head = nn.Linear(64, 1)
+        self.quality_head = (
+            nn.Linear(64, 1) if self.quality_head_enabled else None
+        )
 
     def forward(self, inputs, aux_features=None):
         features = self.pool(self.temporal(self.stem(inputs))).squeeze(-1)
@@ -76,11 +85,14 @@ class SandAlertTCN(nn.Module):
             features = self.fusion(
                 torch.cat((features, self.auxiliary(aux_features)), dim=1)
             )
-        return (
+        outputs = (
             self.event_head(features).squeeze(-1),
             self.ips_head(features).squeeze(-1),
             self.energy_head(features).squeeze(-1),
         )
+        if self.quality_head is not None:
+            return (*outputs, self.quality_head(features).squeeze(-1))
+        return outputs
 
 
 class SandAlertONNXWrapper(nn.Module):
@@ -105,16 +117,18 @@ class SandAlertONNXWrapper(nn.Module):
 
     def forward(self, inputs, aux_features):
         normalized_aux = (aux_features - self.aux_mean) / self.aux_std
-        event_logit, log_ips, energy_residual = self.model(
-            inputs, normalized_aux
-        )
+        model_outputs = self.model(inputs, normalized_aux)
+        event_logit, log_ips, energy_residual = model_outputs[:3]
         analytic_energy = aux_features[:, self.analytic_energy_index]
         energy_db = (
             analytic_energy
             + energy_residual * self.energy_residual_scale_db
         )
-        return (
+        outputs = (
             torch.sigmoid(event_logit),
             torch.exp(torch.clamp_min(log_ips, 0.0)) - 1.0,
             energy_db,
         )
+        if len(model_outputs) > 3:
+            return (*outputs, torch.sigmoid(model_outputs[3]))
+        return outputs

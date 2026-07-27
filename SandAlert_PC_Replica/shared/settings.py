@@ -29,6 +29,7 @@ class ServerSettings(BaseModel):
     ml_enabled: bool = False
     ml_model_path: Path | None = None
     ml_manifest_path: Path | None = None
+    ml_mechanical_rejector_path: Path | None = None
     ml_max_emit_hz: float = Field(default=20.0, gt=0.0, le=100.0)
     ml_background_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
     ml_background_min_frames: int = Field(default=32, ge=4, le=100_000)

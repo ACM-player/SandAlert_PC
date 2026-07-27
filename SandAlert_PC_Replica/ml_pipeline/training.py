@@ -12,7 +12,11 @@ import numpy as np
 from core.dsp_engine import DSPEngine
 from ml_pipeline.dataset import load_manifest, load_waveforms
 from ml_pipeline.features import FEATURE_NAMES, extract_feature_matrix
-from shared.ml_features import AUX_FEATURE_NAMES, extract_shadow_aux_features
+from shared.ml_features import (
+    AUX_FEATURE_NAMES,
+    QUALITY_AUX_FEATURE_NAMES,
+    extract_shadow_aux_features,
+)
 
 
 def _metrics(
@@ -72,6 +76,7 @@ def _aux_feature_matrix(
     records: list[dict],
     waveforms: np.ndarray,
     fs_hz: int,
+    feature_names: tuple[str, ...] = AUX_FEATURE_NAMES,
 ) -> np.ndarray:
     values = []
     for row, waveform in zip(records, waveforms):
@@ -86,9 +91,105 @@ def _aux_feature_matrix(
                 fs_hz,
                 row.get("analytic_relative_energy_db"),
                 air_velocity,
+                feature_names=feature_names,
             ).values
         )
     return np.vstack(values).astype(np.float32)
+
+
+def _rejection_metrics(
+    quality_target,
+    quality_probability,
+    event_target,
+    threshold: float,
+) -> dict:
+    target = np.asarray(quality_target, dtype=bool)
+    probability = np.asarray(quality_probability, dtype=float)
+    event = np.asarray(event_target, dtype=bool)
+    rejected = probability >= threshold
+    hard_negative = target
+    positive = event
+    ordinary_negative = ~target & ~event
+    return {
+        "threshold": float(threshold),
+        "hard_negative_recall": (
+            float(np.mean(rejected[hard_negative]))
+            if np.any(hard_negative)
+            else None
+        ),
+        "positive_false_rejection_rate": (
+            float(np.mean(rejected[positive])) if np.any(positive) else None
+        ),
+        "ordinary_negative_false_rejection_rate": (
+            float(np.mean(rejected[ordinary_negative]))
+            if np.any(ordinary_negative)
+            else None
+        ),
+        "coverage": float(np.mean(~rejected)),
+        "rejected": int(np.count_nonzero(rejected)),
+    }
+
+
+def _calibrate_rejection_threshold(
+    quality_target,
+    quality_probability,
+    event_target,
+    *,
+    max_positive_false_rejection_rate: float = 0.05,
+    max_ordinary_negative_false_rejection_rate: float = 0.05,
+) -> tuple[float, dict]:
+    probability = np.asarray(quality_probability, dtype=float)
+    if probability.size == 0:
+        return 1.000001, _rejection_metrics([], [], [], 1.000001)
+    candidates = np.unique(
+        np.concatenate(
+            (
+                np.asarray([0.0, 0.5, 1.000001]),
+                probability,
+                np.nextafter(probability, np.inf),
+            )
+        )
+    )
+    feasible: list[tuple[float, float, float, dict]] = []
+    for threshold in candidates:
+        metrics = _rejection_metrics(
+            quality_target, probability, event_target, float(threshold)
+        )
+        positive_rejection = (
+            metrics["positive_false_rejection_rate"] or 0.0
+        )
+        ordinary_rejection = (
+            metrics["ordinary_negative_false_rejection_rate"] or 0.0
+        )
+        if (
+            positive_rejection <= max_positive_false_rejection_rate
+            and ordinary_rejection
+            <= max_ordinary_negative_false_rejection_rate
+        ):
+            recall = metrics["hard_negative_recall"] or 0.0
+            feasible.append(
+                (
+                    recall,
+                    -(positive_rejection + ordinary_rejection),
+                    -float(threshold),
+                    metrics,
+                )
+            )
+    if not feasible:
+        threshold = 1.000001
+        return threshold, _rejection_metrics(
+            quality_target, probability, event_target, threshold
+        )
+    selected = max(feasible, key=lambda item: item[:3])[3]
+    selected["constraints"] = {
+        "max_positive_false_rejection_rate": (
+            max_positive_false_rejection_rate
+        ),
+        "max_ordinary_negative_false_rejection_rate": (
+            max_ordinary_negative_false_rejection_rate
+        ),
+    }
+    return float(selected["threshold"]), selected
 
 
 def _dsp_predictions(
@@ -230,6 +331,10 @@ def train_tcn(
     energy_loss_weight: float = 1.0,
     event_target_false_positive_rate: float = 0.05,
     event_positive_weight: float = 1.0,
+    quality_head_enabled: bool = False,
+    quality_loss_weight: float = 1.0,
+    hard_negative_event_weight: float = 2.0,
+    finetune_checkpoint: str | Path | None = None,
 ) -> dict:
     import torch
     from torch import nn
@@ -245,6 +350,10 @@ def train_tcn(
         raise ValueError("target false-positive rate must remain within [0, 1)")
     if event_positive_weight <= 0:
         raise ValueError("event positive weight must be positive")
+    if quality_loss_weight <= 0:
+        raise ValueError("quality loss weight must be positive")
+    if hard_negative_event_weight < 1.0:
+        raise ValueError("hard-negative event weight cannot be below one")
     _seed_everything(seed)
     torch.manual_seed(seed)
     torch.set_num_threads(max(1, int(threads)))
@@ -257,6 +366,11 @@ def train_tcn(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     records = load_manifest(dataset_dir)
+    summary_path = dataset_dir / "dataset_summary.json"
+    if summary_path.is_file():
+        dataset_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if dataset_summary.get("dataset_role") == "frozen_ood_evaluation":
+            raise ValueError("frozen OOD data cannot be used for training")
     dataset_id = dataset_dir.name
     fs_hz = int(records[0]["sample_rate_hz"])
     window_samples = int(records[0]["window_samples"])
@@ -265,7 +379,17 @@ def train_tcn(
     all_waveforms = load_waveforms(
         dataset_dir, [int(row["index"]) for row in records]
     )
-    all_aux = _aux_feature_matrix(records, all_waveforms, fs_hz)
+    aux_feature_names = (
+        QUALITY_AUX_FEATURE_NAMES
+        if quality_head_enabled
+        else AUX_FEATURE_NAMES
+    )
+    all_aux = _aux_feature_matrix(
+        records,
+        all_waveforms,
+        fs_hz,
+        feature_names=aux_feature_names,
+    )
     aux_by_index = {
         int(row["index"]): all_aux[position]
         for position, row in enumerate(records)
@@ -329,6 +453,10 @@ def train_tcn(
                 torch.tensor(np.log1p(row["ips_hz"]), dtype=torch.float32),
                 torch.tensor(target_energy, dtype=torch.float32),
                 torch.tensor(energy_residual, dtype=torch.float32),
+                torch.tensor(
+                    float(row.get("mechanical_reject_target", False)),
+                    dtype=torch.float32,
+                ),
             )
 
     split_rows = {
@@ -359,11 +487,53 @@ def train_tcn(
         persistent_workers=workers > 0,
     )
 
-    model = SandAlertTCN(aux_feature_count=len(AUX_FEATURE_NAMES)).to(device)
+    model = SandAlertTCN(
+        aux_feature_count=len(aux_feature_names),
+        quality_head_enabled=quality_head_enabled,
+    ).to(device)
+    finetune_summary = {
+        "requested": str(finetune_checkpoint) if finetune_checkpoint else None,
+        "loaded_keys": 0,
+        "skipped_keys": 0,
+    }
+    if finetune_checkpoint is not None:
+        checkpoint = torch.load(
+            Path(finetune_checkpoint), map_location="cpu", weights_only=False
+        )
+        source_state = checkpoint.get("state_dict", checkpoint)
+        current_state = model.state_dict()
+        compatible = {
+            key: value
+            for key, value in source_state.items()
+            if key in current_state and current_state[key].shape == value.shape
+        }
+        model.load_state_dict(compatible, strict=False)
+        finetune_summary["loaded_keys"] = len(compatible)
+        finetune_summary["skipped_keys"] = len(source_state) - len(compatible)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     event_loss = nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(
             float(event_positive_weight), dtype=torch.float32, device=device
+        ),
+        reduction="none",
+    )
+    train_quality_targets = np.asarray(
+        [
+            float(row.get("mechanical_reject_target", False))
+            for row in split_rows["train"]
+        ],
+        dtype=np.float32,
+    )
+    quality_positive_count = float(np.sum(train_quality_targets))
+    quality_negative_count = float(
+        train_quality_targets.size - quality_positive_count
+    )
+    quality_positive_weight = (
+        quality_negative_count / max(quality_positive_count, 1.0)
+    )
+    quality_loss = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(
+            quality_positive_weight, dtype=torch.float32, device=device
         )
     )
     regression_loss = nn.SmoothL1Loss()
@@ -384,6 +554,8 @@ def train_tcn(
         ips_estimates = []
         energy_values = []
         energy_estimates = []
+        quality_values = []
+        quality_probability_values = []
         for (
             waveform,
             normalized_aux,
@@ -392,6 +564,7 @@ def train_tcn(
             log_ips,
             energy,
             energy_residual,
+            quality_target,
         ) in loader:
             waveform = waveform.to(device)
             normalized_aux = normalized_aux.to(device)
@@ -400,28 +573,39 @@ def train_tcn(
             log_ips = log_ips.to(device)
             energy = energy.to(device)
             energy_residual = energy_residual.to(device)
+            quality_target = quality_target.to(device)
             if train:
                 optimizer.zero_grad(set_to_none=True)
             with torch.set_grad_enabled(train):
+                model_outputs = model(waveform, normalized_aux)
                 (
                     event_logit,
                     predicted_log_ips,
                     predicted_energy_residual,
-                ) = model(waveform, normalized_aux)
+                ) = model_outputs[:3]
                 predicted_energy = (
-                    raw_aux[:, AUX_FEATURE_NAMES.index(
+                    raw_aux[:, aux_feature_names.index(
                         "analytic_relative_energy_db"
                     )]
                     + predicted_energy_residual * energy_residual_scale_db
                 )
+                event_weights = 1.0 + quality_target * (
+                    hard_negative_event_weight - 1.0
+                )
                 loss = (
-                    event_loss(event_logit, event)
+                    torch.mean(event_loss(event_logit, event) * event_weights)
                     + regression_loss(predicted_log_ips, log_ips)
                     + energy_loss_weight
                     * regression_loss(
                         predicted_energy_residual, energy_residual
                     )
                 )
+                quality_logit = None
+                if quality_head_enabled:
+                    quality_logit = model_outputs[3]
+                    loss = loss + quality_loss_weight * quality_loss(
+                        quality_logit, quality_target
+                    )
                 if train:
                     loss.backward()
                     optimizer.step()
@@ -438,6 +622,11 @@ def train_tcn(
             )
             energy_values.extend(energy.detach().cpu().numpy())
             energy_estimates.extend(predicted_energy.detach().cpu().numpy())
+            quality_values.extend(quality_target.detach().cpu().numpy())
+            if quality_head_enabled and quality_logit is not None:
+                quality_probability_values.extend(
+                    torch.sigmoid(quality_logit).detach().cpu().numpy()
+                )
         metrics = _metrics(
             np.asarray(event_values),
             np.asarray(probability_values),
@@ -448,8 +637,15 @@ def train_tcn(
             event_threshold=event_threshold,
         )
         metrics["loss"] = total / max(count, 1)
+        if quality_head_enabled:
+            metrics["quality_head"] = _rejection_metrics(
+                np.asarray(quality_values),
+                np.asarray(quality_probability_values),
+                np.asarray(event_values),
+                0.5,
+            )
         if return_predictions:
-            return metrics, {
+            predictions = {
                 "event": np.asarray(event_values),
                 "probability": np.asarray(probability_values),
                 "ips": np.asarray(ips_values),
@@ -457,6 +653,12 @@ def train_tcn(
                 "energy": np.asarray(energy_values),
                 "energy_estimate": np.asarray(energy_estimates),
             }
+            if quality_head_enabled:
+                predictions["quality_target"] = np.asarray(quality_values)
+                predictions["quality_probability"] = np.asarray(
+                    quality_probability_values
+                )
+            return metrics, predictions
         return metrics
 
     history = []
@@ -515,11 +717,29 @@ def train_tcn(
         validation_predictions["energy_estimate"],
         event_threshold=event_decision_threshold,
     )
-    test_metrics = run_epoch(
+    quality_decision_threshold = 1.000001
+    quality_calibration = None
+    if quality_head_enabled:
+        quality_decision_threshold, quality_calibration = (
+            _calibrate_rejection_threshold(
+                validation_predictions["quality_target"],
+                validation_predictions["quality_probability"],
+                validation_predictions["event"],
+            )
+        )
+    test_metrics, test_predictions = run_epoch(
         test_loader,
         train=False,
         event_threshold=event_decision_threshold,
+        return_predictions=True,
     )
+    if quality_head_enabled:
+        test_metrics["quality_head"] = _rejection_metrics(
+            test_predictions["quality_target"],
+            test_predictions["quality_probability"],
+            test_predictions["event"],
+            quality_decision_threshold,
+        )
     test_rows = split_rows["test"]
     test_waveforms = load_waveforms(
         dataset_dir, [row["index"] for row in test_rows]
@@ -536,8 +756,10 @@ def train_tcn(
     )
     promotion = _promotion_decision(test_metrics, dsp_test_metrics)
 
+    model_version = "v3-quality" if quality_head_enabled else "v2"
     model_id = (
-        f"sandalert-tcn-v2-{dataset_id}-energy-residual-seed{seed}"
+        f"sandalert-tcn-{model_version}-{dataset_id}-"
+        f"energy-residual-seed{seed}"
     )
     checkpoint_path = output_dir / "candidate.pt"
     torch.save({
@@ -547,12 +769,17 @@ def train_tcn(
         "window_samples": window_samples,
         "seed": seed,
         "dataset_id": dataset_id,
-        "aux_feature_names": list(AUX_FEATURE_NAMES),
+        "aux_feature_names": list(aux_feature_names),
         "aux_mean": aux_mean,
         "aux_std": aux_std,
         "energy_residual_scale_db": energy_residual_scale_db,
         "event_decision_threshold": event_decision_threshold,
         "event_positive_weight": event_positive_weight,
+        "quality_head_enabled": quality_head_enabled,
+        "quality_decision_threshold": quality_decision_threshold,
+        "quality_loss_weight": quality_loss_weight,
+        "hard_negative_event_weight": hard_negative_event_weight,
+        "finetune": finetune_summary,
     }, checkpoint_path)
 
     onnx_path = output_dir / "candidate.onnx"
@@ -562,23 +789,26 @@ def train_tcn(
             model.eval(),
             aux_mean,
             aux_std,
-            AUX_FEATURE_NAMES.index("analytic_relative_energy_db"),
+            aux_feature_names.index("analytic_relative_energy_db"),
             energy_residual_scale_db,
         )
         example = torch.zeros(1, 1, window_samples, dtype=torch.float32)
         example_aux = torch.zeros(
-            1, len(AUX_FEATURE_NAMES), dtype=torch.float32
+            1, len(aux_feature_names), dtype=torch.float32
         )
+        output_names = [
+            "event_probability",
+            "ips_estimate",
+            "relative_energy_db",
+        ]
+        if quality_head_enabled:
+            output_names.append("mechanical_interference_probability")
         torch.onnx.export(
             wrapper,
             (example, example_aux),
             onnx_path,
             input_names=["waveform", "aux_features"],
-            output_names=[
-                "event_probability",
-                "ips_estimate",
-                "relative_energy_db",
-            ],
+            output_names=output_names,
             dynamic_axes={
                 "waveform": {0: "batch"},
                 "aux_features": {0: "batch"},
@@ -608,11 +838,19 @@ def train_tcn(
         "event_positive_weight": event_positive_weight,
         "calibrated_validation_metrics": calibrated_validation_metrics,
         "energy_residual_scale_db": energy_residual_scale_db,
-        "aux_feature_names": list(AUX_FEATURE_NAMES),
+        "aux_feature_names": list(aux_feature_names),
         "aux_mean": aux_mean.tolist(),
         "aux_std": aux_std.tolist(),
         "air_velocity_optional": True,
         "particle_size_input": False,
+        "quality_head_enabled": quality_head_enabled,
+        "quality_decision_threshold": quality_decision_threshold,
+        "quality_loss_weight": quality_loss_weight,
+        "quality_positive_weight": quality_positive_weight,
+        "hard_negative_event_weight": hard_negative_event_weight,
+        "quality_calibration": quality_calibration,
+        "finetune": finetune_summary,
+        "frozen_ood_used_for_training_or_calibration": False,
         "onnx_status": onnx_status,
         "test_metrics": test_metrics,
         "dsp_test_metrics": dsp_test_metrics,

@@ -10,6 +10,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from shared.contracts import AnalysisResult, MLResult, MLStatus, WaveformMetadata
+from shared.mechanical_rejector import MechanicalInterferenceRejector
 from shared.ml_features import (
     AUX_FEATURE_NAMES,
     SignalAuxFeatures,
@@ -34,6 +35,7 @@ class ONNXShadowModel:
         self.aux_mean = np.empty(0, dtype=np.float32)
         self.aux_std = np.empty(0, dtype=np.float32)
         self.event_decision_threshold = 0.5
+        self.quality_decision_threshold = 1.000001
         self.reason = ""
         if settings.ml_enabled:
             self._load()
@@ -84,6 +86,9 @@ class ONNXShadowModel:
             self.event_decision_threshold = float(
                 manifest.get("event_decision_threshold") or 0.5
             )
+            self.quality_decision_threshold = float(
+                manifest.get("quality_decision_threshold") or 1.000001
+            )
         except Exception as exc:  # onnxruntime exposes provider-specific errors
             self.session = None
             self.reason = f"ONNX load failed: {exc}"
@@ -106,6 +111,14 @@ class ONNXShadowModel:
         waveform: np.ndarray,
         aux_features: np.ndarray | None = None,
     ) -> tuple[float, float, float]:
+        values = self.predict_extended(waveform, aux_features)
+        return values[:3]
+
+    def predict_extended(
+        self,
+        waveform: np.ndarray,
+        aux_features: np.ndarray | None = None,
+    ) -> tuple[float, float, float, float | None]:
         if self.session is None:
             raise RuntimeError(self.reason or "ONNX model unavailable")
         feeds = {
@@ -137,6 +150,17 @@ class ONNXShadowModel:
                 float(np.clip(values["event_probability"], 0.0, 1.0)),
                 max(0.0, values["ips_estimate"]),
                 values["relative_energy_db"],
+                (
+                    float(
+                        np.clip(
+                            values["mechanical_interference_probability"],
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    if "mechanical_interference_probability" in values
+                    else None
+                ),
             )
         if len(outputs) < 3:
             raise RuntimeError("ONNX model must expose three shadow outputs")
@@ -144,6 +168,13 @@ class ONNXShadowModel:
             float(np.clip(np.asarray(outputs[0]).reshape(-1)[0], 0.0, 1.0)),
             max(0.0, float(np.asarray(outputs[1]).reshape(-1)[0])),
             float(np.asarray(outputs[2]).reshape(-1)[0]),
+            (
+                float(
+                    np.clip(np.asarray(outputs[3]).reshape(-1)[0], 0.0, 1.0)
+                )
+                if len(outputs) > 3
+                else None
+            ),
         )
 
 
@@ -163,6 +194,17 @@ class ShadowInferenceEngine:
         self.coalesced_windows = 0
         self.air_velocity_m_s = settings.ml_air_velocity_m_s
         self.context_timestamp_ns = 0
+        self.mechanical_rejector = None
+        self.mechanical_rejector_reason = ""
+        if settings.ml_mechanical_rejector_path is not None:
+            try:
+                self.mechanical_rejector = (
+                    MechanicalInterferenceRejector.load(
+                        settings.ml_mechanical_rejector_path
+                    )
+                )
+            except (OSError, ValueError, KeyError) as exc:
+                self.mechanical_rejector_reason = str(exc)
 
     def reset(self, fs_hz: int) -> None:
         self.current_fs_hz = int(fs_hz)
@@ -338,6 +380,11 @@ class ShadowInferenceEngine:
                 self.model.target_fs_hz or meta.fs_hz,
                 relative_db,
                 air_velocity,
+                feature_names=(
+                    tuple(self.model.aux_feature_names)
+                    if self.model.aux_feature_names
+                    else None
+                ),
             )
         except ValueError as exc:
             return MLResult(
@@ -358,17 +405,63 @@ class ShadowInferenceEngine:
                 **common,
             )
 
+        if self.mechanical_rejector is not None:
+            try:
+                prefilter = self.mechanical_rejector.predict(
+                    raw_window,
+                    self.model.target_fs_hz or meta.fs_hz,
+                )
+            except ValueError as exc:
+                quality_flags.append(f"mechanical_prefilter_failed:{exc}")
+            else:
+                if prefilter.rejected:
+                    return MLResult(
+                        status="skipped",
+                        interference_probability=prefilter.probability,
+                        interference_route="prefilter",
+                        quality_flags=quality_flags
+                        + ["mechanical_interference_prefilter"],
+                        **common,
+                    )
+        elif self.mechanical_rejector_reason:
+            quality_flags.append(
+                "mechanical_prefilter_unavailable:"
+                f"{self.mechanical_rejector_reason}"
+            )
+
         window = self._normalize(raw_window)
         started = time.perf_counter()
         try:
-            event_probability, ips_estimate, energy_estimate = self.model.predict(
-                window, aux_features.values
-            )
+            if hasattr(self.model, "predict_extended"):
+                (
+                    event_probability,
+                    ips_estimate,
+                    energy_estimate,
+                    interference_probability,
+                ) = self.model.predict_extended(window, aux_features.values)
+            else:
+                event_probability, ips_estimate, energy_estimate = (
+                    self.model.predict(window, aux_features.values)
+                )
+                interference_probability = None
         except Exception as exc:
             return MLResult(
                 status="unavailable",
                 inference_latency_ms=(time.perf_counter() - started) * 1000.0,
                 quality_flags=[f"inference_failed:{exc}"],
+                **common,
+            )
+        if (
+            interference_probability is not None
+            and interference_probability >= self.model.quality_decision_threshold
+        ):
+            return MLResult(
+                status="skipped",
+                inference_latency_ms=(time.perf_counter() - started) * 1000.0,
+                interference_probability=interference_probability,
+                interference_route="quality_head",
+                quality_flags=quality_flags
+                + ["mechanical_interference_quality_head"],
                 **common,
             )
         return MLResult(
@@ -377,6 +470,12 @@ class ShadowInferenceEngine:
             ips_estimate=ips_estimate,
             ml_relative_energy_db=energy_estimate,
             inference_latency_ms=(time.perf_counter() - started) * 1000.0,
+            interference_probability=interference_probability,
+            interference_route=(
+                "quality_head"
+                if interference_probability is not None
+                else None
+            ),
             quality_flags=quality_flags,
             **common,
         )

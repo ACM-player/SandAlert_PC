@@ -30,6 +30,8 @@ class DevelopmentTab(QWidget):
             ("relative_energy", "Relative energy"),
             ("ml_relative_energy", "ML relative energy"),
             ("probability", "Impact probability"),
+            ("interference_probability", "Mechanical interference probability"),
+            ("interference_route", "Mechanical rejection route"),
             ("latency", "Inference latency"),
             ("quality", "Quality flags"),
         ]
@@ -98,6 +100,12 @@ class DevelopmentTab(QWidget):
         )
         self._labels["probability"].setText(
             self._number(ml.get("event_probability"), 3)
+        )
+        self._labels["interference_probability"].setText(
+            self._number(ml.get("interference_probability"), 3)
+        )
+        self._labels["interference_route"].setText(
+            str(ml.get("interference_route") or "—")
         )
         self._labels["latency"].setText(
             self._number(ml.get("inference_latency_ms"), 2, " ms")
