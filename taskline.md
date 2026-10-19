@@ -5,7 +5,7 @@
 ## 阶段与代码
 
 - 分支：`codex/stage1-bugfixes`，从 `98be3ab` 继续修复；新设备应拉取该分支，默认 main 尚未合并本阶段。
-- 目标：修复本阶段审查发现的 Modbus、采样率/计量、Edge UI、标定范围和文档问题，并完成本机与 lab 服务器验证后交接。
+- 阶段目标已完成：Modbus、采样率/计量、Edge UI、标定范围和文档修复已通过本机与 lab 验证。代码提交 `534683f`；后续交接提交只补充文档。
 - 远程 `ssh lab` 已恢复。服务器原目录 `/home/lks/project/SandAlert_PC` 干净、仍为 `98be3ab`，检查时 8765 未监听。
 - 本机解释器 `/opt/miniconda3/envs/playground/bin/python`；服务器必须使用 `/home/lks/miniconda3/envs/core/bin/python`。
 
@@ -26,7 +26,9 @@
 - 本机 2026-10-19：`QT_QPA_PLATFORM=offscreen /opt/miniconda3/envs/playground/bin/python -m pytest -q` → **40 passed**，1 条既有 Starlette/httpx 弃用警告。
 - 本机完整链路：`python scripts/smoke_pipeline.py` → 12 波形、12 分析、2 Modbus、可靠方向 61.5°（目标 60°）、12 行 CSV、spool=0、质量积分一致；临时目录自动清理，退出无后台异常。
 - 已查看离屏 UI 截图，检查指标来源控件和窗口布局。
-- lab 验证待从 GitHub 拉取候选提交至独立工作树后执行；最终结果将在服务器复测后更新本节。
+- lab：GitHub 拉取 `534683f` 到 `/home/lks/project/SandAlert_PC_stage1_bugfixes` 独立工作树；指定 core Python 执行全套测试 → **40 passed**，同一条既有弃用警告，无跳过。
+- 跨设备链路：Mac Edge → SSH 回环隧道 → lab 独立计算实例 → Mac 网关，得到 12 分析、2 Modbus、61.5°、12 行 CSV、spool=0、积分一致。独立服务使用临时令牌/数据库/波形目录，验证后服务及隧道已关闭。
+- 原服务器目录仍为 `98be3ab` 且干净，8765 未监听；本阶段验证不等于已部署或启动常驻服务。
 
 ## 迁移及边界
 
@@ -39,4 +41,7 @@
 
 - 学习资料：`项目汇报/第一次项目汇报/项目学习与汇报底稿.md`，保留 2026-10-16 的学习计划，并注明新代码语义的更新入口。
 - 既有两处 `.DS_Store` 改动作为本机元数据保留，不纳入提交。
-- 完成本阶段服务器测试后更新本文件并推送；新设备按阶段迁移手册拉取分支、创建环境、配置实际连接，再运行单测和一次独立冒烟检查。
+- 本阶段代码已推送到 GitHub 的 `codex/stage1-bugfixes`；交接记录随最终文档提交推送。
+- 新设备：`git clone --branch codex/stage1-bugfixes https://github.com/ACM-player/SandAlert_PC.git`；已有仓库则 fetch 后 switch 同名分支并 `git pull --ff-only`。创建 Python 3.10 环境，安装 `requirements/dev.txt`，按 `STAGE1_BUGFIXES.md` 运行单测和独立冒烟检查。
+- 实际 lab 部署需要拉取该分支/明确提交、核对配置并用 core Python 启动；当前独立测试工作树可留作验证依据，原运行目录未切换。
+- GitHub 对维护者启用了邮箱隐私保护，普通私有邮箱提交会被 GH007 拒绝。本阶段提交使用仓库历史已有的 `63245477+ACM-player@users.noreply.github.com`，未更改全局 Git 设置。

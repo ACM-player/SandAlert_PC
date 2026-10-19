@@ -85,3 +85,9 @@ unset SANDALERT_SMOKE_TOKEN
 
 检查应得到 12 个 analysis.result、Modbus 结果、接近 60° 的可靠方向、12 行 CSV、零待发消息，以及砂率积分与累计质量一致。
 最终测试结果、服务器验证目录和提交信息记录在仓库根目录 [taskline.md](../taskline.md)。
+
+## 本阶段已验证结果
+
+2026-10-19 代码提交 `534683f`：Mac playground 与 lab core 环境均为 **40 passed**，各有一条既有 Starlette/httpx 弃用警告。
+本机全链路和 Mac 经 SSH 隧道访问 lab 的全链路均得到 12 条分析、2 条 Modbus、61.5° 可靠方向、12 行 CSV、零待发消息，质量积分一致。
+临时测试服务已关闭，原服务器运行目录未自动切换；具体位置及后续操作见 `taskline.md`。
