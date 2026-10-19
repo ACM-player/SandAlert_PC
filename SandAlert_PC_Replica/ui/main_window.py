@@ -11,6 +11,8 @@
 #   5. closeEvent 安全终止所有后台线程，防止 Python 崩溃
 # =============================================================================
 
+import math
+
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QFileDialog, QStackedWidget
 from PySide6.QtGui import QActionGroup, QAction
 
@@ -58,6 +60,7 @@ class MainWindow(QMainWindow):
         # ---- 阈值绑定 ----
         self.param_tab.p160_input.textChanged.connect(self.on_threshold_changed)
         self.on_threshold_changed(self.param_tab.p160_input.text())
+        self.param_tab.sample_rate_input.textChanged.connect(self.on_sample_rate_changed)
         
         # ---- 标定系统绑定 ----
         self.param_tab.btn_start_calib.clicked.connect(self.start_calibration)
@@ -67,6 +70,8 @@ class MainWindow(QMainWindow):
         # ---- 报警阈值绑定 ----
         self.param_tab.caution_level_input.textChanged.connect(self.on_alarm_levels_changed)
         self.param_tab.alarm_level_input.textChanged.connect(self.on_alarm_levels_changed)
+        self.signal_tab.source_mode_changed.connect(self.on_source_mode_changed)
+        self.on_source_mode_changed("idle")
 
         # ---- 历史日志分析按钮绑定（双核导入） ----
         # 按钮 A: CSV 文件（已在 DataLogWidget 内部绑定 _on_load_csv）
@@ -109,11 +114,53 @@ class MainWindow(QMainWindow):
 
     # ==================== 回调函数 ====================
 
+    def on_source_mode_changed(self, mode):
+        """Local waveform calibration is available only for local waveforms."""
+        enabled = mode == "waveform"
+        self._local_calibration_enabled = enabled
+        self.signal_tab.is_calibrating = False
+        self.signal_tab.accumulated_energy = 0.0
+        for control in (
+            self.param_tab.btn_start_calib, self.param_tab.calib_mass_input,
+            self.param_tab.factor_input, self.param_tab.p160_input,
+            self.param_tab.sample_rate_input,
+        ):
+            control.setEnabled(enabled)
+        self.param_tab.btn_stop_calib.setEnabled(False)
+        for control in (self.param_tab.caution_level_input, self.param_tab.alarm_level_input):
+            control.setEnabled(enabled)
+        if enabled:
+            self.on_sample_rate_changed(self.param_tab.sample_rate_input.text())
+            status = "Status: Ready (local waveform calibration)"
+        elif mode == "edge":
+            status = "Edge: 标定和报警参数由服务器配置；当前不支持从 UI 修改"
+        elif mode == "modbus":
+            status = "Modbus: 使用仪表自身的标定、累计量和报警状态"
+        else:
+            status = "请先连接本地波形数据源，再进行标定"
+        self.param_tab.lbl_calib_status.setText(status)
+        self.param_tab.lbl_calib_status.setStyleSheet("color: #555;")
+
+    def on_sample_rate_changed(self, text):
+        if self.signal_tab.is_calibrating:
+            return False
+        try:
+            frequency = float(text)
+            if math.isfinite(frequency) and frequency.is_integer() and frequency > 40:
+                self.signal_tab.set_local_sample_rate(int(frequency))
+                self.param_tab.sample_rate_input.setStyleSheet("")
+                return True
+        except ValueError:
+            pass
+        self.param_tab.sample_rate_input.setStyleSheet("background-color: #ffe0e0;")
+        return False
+
     def on_threshold_changed(self, text):
         """当用户在 Parameters 页面修改阈值时，实时同步到 signal_tab"""
         try:
             new_th = float(text)
-            self.signal_tab.user_threshold = new_th
+            if math.isfinite(new_th) and new_th >= 0:
+                self.signal_tab.user_threshold = new_th
         except ValueError:
             pass
 
@@ -121,7 +168,7 @@ class MainWindow(QMainWindow):
         """当用户手动修改 Factor 时，实时同步到 signal_tab"""
         try:
             new_factor = float(text)
-            if new_factor > 0:
+            if math.isfinite(new_factor) and new_factor > 0:
                 self.signal_tab.K_v2 = new_factor
         except ValueError:
             pass
@@ -138,27 +185,38 @@ class MainWindow(QMainWindow):
 
     def start_calibration(self):
         """开始标定：清空能量池，进入累加模式"""
+        if not self._local_calibration_enabled:
+            return
+        if not self.on_sample_rate_changed(self.param_tab.sample_rate_input.text()):
+            self.param_tab.lbl_calib_status.setText("请先填写大于 40 Hz 的整数采样率")
+            return
         self.signal_tab.is_calibrating = True
         self.signal_tab.accumulated_energy = 0.0
         self.param_tab.btn_start_calib.setEnabled(False)
         self.param_tab.btn_stop_calib.setEnabled(True)
+        self.param_tab.sample_rate_input.setEnabled(False)
         self.param_tab.lbl_calib_status.setText("Status: Accumulating Acoustic Energy... Please inject sand now!")
         self.param_tab.lbl_calib_status.setStyleSheet("color: red; font-weight: bold;")
 
     def stop_calibration(self):
         """停止标定：计算出专属转换系数并应用"""
+        if not self._local_calibration_enabled or not self.signal_tab.is_calibrating:
+            return
         self.signal_tab.is_calibrating = False
         self.param_tab.btn_start_calib.setEnabled(True)
         self.param_tab.btn_stop_calib.setEnabled(False)
+        self.param_tab.sample_rate_input.setEnabled(True)
         try:
             injected_mass = float(self.param_tab.calib_mass_input.text())
+            if not math.isfinite(injected_mass) or injected_mass <= 0:
+                raise ValueError("injected mass must be positive and finite")
             total_energy = self.signal_tab.accumulated_energy
             if total_energy == 0:
                 self.param_tab.lbl_calib_status.setText("Status: Failed. No sand impacts detected.")
                 self.param_tab.lbl_calib_status.setStyleSheet("color: orange;")
                 return
             new_factor = total_energy / injected_mass
-            self.param_tab.factor_input.setText(f"{new_factor:.6f}")
+            self.param_tab.factor_input.setText(f"{new_factor:.12g}")
             self.param_tab.lbl_calib_status.setText(f"Status: Success! Factor Applied. Total Energy: {total_energy:.4f}")
             self.param_tab.lbl_calib_status.setStyleSheet("color: green; font-weight: bold;")
         except ValueError:
@@ -208,11 +266,11 @@ class MainWindow(QMainWindow):
                 self.active_thread.status_msg.connect(
                     lambda msg: print(f"EDGE: {msg}")
                 )
-                self.signal_tab.set_edge_mode(True)
+                self.signal_tab.set_source_mode("edge")
                 self.active_thread.start()
 
             elif use_file_replay:
-                self.signal_tab.set_edge_mode(False)
+                self.signal_tab.set_source_mode("waveform")
                 # ====== 文件回放模式 ======
                 data_dir = QFileDialog.getExistingDirectory(
                     self, "选择存放现场数据文件的文件夹", "/"
@@ -223,9 +281,11 @@ class MainWindow(QMainWindow):
                     self.active_thread.data_received.connect(self.signal_tab.update_from_serial)
                     self.active_thread.status_msg.connect(lambda msg: print(f"SYS MSG: {msg}"))
                     self.active_thread.start()
+                else:
+                    self.signal_tab.set_source_mode("idle")
                     
             elif use_modbus:
-                self.signal_tab.set_edge_mode(False)
+                self.signal_tab.set_source_mode("modbus")
                 # ====== Modbus RTU/TCP 模式 ======
                 if use_tcp:
                     # TCP 模式：连接本地 Mock 服务器
@@ -251,7 +311,7 @@ class MainWindow(QMainWindow):
                 self.active_thread.start()
                 
             else:
-                self.signal_tab.set_edge_mode(False)
+                self.signal_tab.set_source_mode("waveform")
                 # ====== Mock String 串口模式（默认） ======
                 print(f"\n[调试] Mock String 串口模式，连接 {port}，波特率 {baudrate}")
                 self.active_thread = SerialReaderThread(port, baudrate)

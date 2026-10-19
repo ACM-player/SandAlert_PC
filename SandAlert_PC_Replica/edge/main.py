@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from edge.acquisition import FileReplaySource, MockModbusSource
 from edge.local_gateway import LocalGateway
-from edge.spool import DurableSpool, SpoolFullError
+from edge.spool import DurableSpool, SpoolFullError, spool_io
 from edge.upstream import UpstreamClient
 from shared.settings import load_edge_settings
 from shared.waveform_codec import encode_waveform
@@ -46,7 +46,7 @@ async def run_edge(config_path: Path | None = None) -> None:
             payload = encode_waveform(meta, array)
             await gateway.broadcast(payload)
             try:
-                await asyncio.to_thread(
+                await spool_io(
                     spool.enqueue, str(session_id), meta.sequence, "waveform", payload
                 )
             except SpoolFullError as exc:
@@ -62,7 +62,7 @@ async def run_edge(config_path: Path | None = None) -> None:
                 return
             payload = reading.model_dump_json().encode("utf-8")
             try:
-                await asyncio.to_thread(
+                await spool_io(
                     spool.enqueue,
                     str(session_id), reading.sequence, "modbus", payload,
                 )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import threading
@@ -9,6 +10,16 @@ from pathlib import Path
 
 class SpoolFullError(RuntimeError):
     pass
+
+
+async def spool_io(function, *args):
+    """Finish a disk operation before cancellation lets the spool be closed."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 @dataclass(frozen=True)

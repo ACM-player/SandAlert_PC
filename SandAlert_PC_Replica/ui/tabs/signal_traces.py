@@ -1,12 +1,13 @@
 import time
+from collections import deque
 import numpy as np
 from scipy.signal import find_peaks
 
 import pyqtgraph as pg
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                                QCheckBox, QLineEdit, QProgressBar, QPushButton,
-                               QFileDialog, QSplitter, QGroupBox)
-from PySide6.QtCore import QTimer, Qt, QRectF
+                               QFileDialog, QSplitter, QGroupBox, QComboBox)
+from PySide6.QtCore import QTimer, Qt, QRectF, Signal
 from PySide6.QtGui import QPen
 import csv               # 用于 CSV 文件写入（工业报表数据持久化）
 import traceback         # 用于 UI 槽函数内的异常打印诊断
@@ -17,6 +18,8 @@ from core.tdoa_worker import TDOAWorker
 
 class SignalTracesTab(QWidget):
     """标签页 A: 实时波形图 + 三相分离器效率评估 + CSV 工业报表 + TDOA 阵列定位"""
+    source_mode_changed = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -68,6 +71,22 @@ class SignalTracesTab(QWidget):
         self.info_layout.addWidget(self.btn_csv_log)
         
         self.layout.addLayout(self.info_layout)
+        self.edge_source_controls = QWidget()
+        source_layout = QHBoxLayout(self.edge_source_controls)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.addWidget(QLabel("指标来源:"))
+        self.metric_source_combo = QComboBox()
+        self.metric_source_combo.addItem("自动（优先波形）", "auto")
+        self.metric_source_combo.addItem("波形分析", "waveform")
+        self.metric_source_combo.addItem("Modbus 仪表", "modbus")
+        self.metric_source_combo.currentIndexChanged.connect(self._render_edge_metrics)
+        source_layout.addWidget(self.metric_source_combo)
+        source_layout.addStretch()
+        self.layout.addWidget(self.edge_source_controls)
+        self.edge_source_controls.hide()
+        self._edge_metric_results = {}
+        self._edge_tdoa_keys = deque()
+        self._edge_tdoa_seen = set()
         
         # ====== 报警阈值变量 ======
         self.caution_limit = 0.05
@@ -81,7 +100,7 @@ class SignalTracesTab(QWidget):
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')
         self.plot_widget.setLabel('left', 'Voltage', units='V')
-        self.plot_widget.setLabel('bottom', 'Time', units='s')
+        self.plot_widget.setLabel('bottom', 'Sample Index')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         
         # 三条曲线：原始信号(红)、处理信号(蓝)、阈值线(绿)
@@ -95,7 +114,7 @@ class SignalTracesTab(QWidget):
         self.plot_widget.addItem(self.vLine, ignoreBounds=True)
         self.plot_widget.addItem(self.hLine, ignoreBounds=True)
         
-        self.crosshair_label = QLabel("X: 0.00 s, Y: 0.00 V")
+        self.crosshair_label = QLabel("Sample: 0, Y: 0.00 V")
         self.crosshair_label.setAlignment(Qt.AlignRight)
         
         self.proxy = pg.SignalProxy(self.plot_widget.scene().sigMouseMoved, rateLimit=60, slot=self.mouseMoved)
@@ -109,7 +128,7 @@ class SignalTracesTab(QWidget):
         self.polar_widget.setTitle('TDOA-AE Azimuth (Polar)')
         # 锁定等比例，范围 [-1.3, 1.3] 给文字留出呼吸空间
         self.polar_widget.setAspectLocked(lock=True, ratio=1.0)
-        self.polar_widget.setRange(xRange=[-1.3, 1.3], yRange=[-1.3, 1.3])
+        self.polar_widget.setRange(xRange=[-1.5, 1.5], yRange=[-1.5, 1.5])
         self.polar_widget.hideButtons()
         self.polar_widget.showGrid(x=False, y=False)
         
@@ -215,6 +234,8 @@ class SignalTracesTab(QWidget):
         self.csv_file = None            # CSV 文件对象
         self.csv_writer = None          # CSV 写入器
         self.total_mass_recorded = 0.0  # 本次录制的累积出砂量（克）
+        self._modbus_last_total = None
+        self._csv_modbus_last_total = None
         
         # ====== 多通道环形缓冲池（用于 TDOA 切片） ======
         # 由于当前数据源是单通道，我们维护一个 4 通道缓冲池
@@ -293,6 +314,8 @@ class SignalTracesTab(QWidget):
         - 关闭：停止 TDOA 工作线程，清空极坐标图
         """
         if self._edge_mode:
+            if not enabled:
+                self._clear_tdoa_history()
             self.tdoa_status_label.setText(
                 "TDOA: 等待服务器结果" if enabled else "TDOA: 远端显示已关闭"
             )
@@ -309,11 +332,7 @@ class SignalTracesTab(QWidget):
                 self.tdoa_status_label.setText("TDOA: 已关闭")
                 self.tdoa_status_label.setStyleSheet("color: #888; font-style: italic;")
             # 清空极坐标图
-            self.tdoa_history.clear()
-            self.tdoa_last_angle = None
-            self.polar_hits_scatter.setData([])
-            self.polar_last_hit.setData([])
-            self.polar_angle_label.setText("")
+            self._clear_tdoa_history()
             print("[TDOA] 阵列空间定位已关闭")
 
     # ================================================================
@@ -460,22 +479,55 @@ class SignalTracesTab(QWidget):
             mousePoint = self.plot_widget.plotItem.vb.mapSceneToView(pos)
             self.vLine.setPos(mousePoint.x())
             self.hLine.setPos(mousePoint.y())
-            self.crosshair_label.setText(f"X: {mousePoint.x():.2f} s, Y: {mousePoint.y():.2f} V")
+            self.crosshair_label.setText(f"Sample: {mousePoint.x():.0f}, Y: {mousePoint.y():.2f} V")
 
     # ==================== Edge/Server 前后端分离入口 ====================
+    def set_local_sample_rate(self, frequency):
+        if self.dsp.fs != frequency:
+            self.dsp.set_sample_rate(frequency)
+            self.voltage_data.fill(-2.85)
+            self.multi_channel_buffer.fill(-2.85)
+        self.tdoa_worker.update_parameters(fs=frequency)
+
+    def _clear_tdoa_history(self):
+        self.tdoa_history.clear()
+        self.tdoa_last_angle = None
+        self.polar_hits_scatter.setData([])
+        self.polar_last_hit.setData([])
+        self.polar_angle_label.setText("")
+
+    def set_source_mode(self, mode: str):
+        self.set_edge_mode(mode == "edge")
+        if mode == "modbus":
+            self.cb_tdoa.setChecked(False)
+        self.source_mode_changed.emit(mode)
+
     def set_edge_mode(self, enabled: bool):
         """切换到独立 Edge 采集 + 服务器计算模式。"""
+        # 每次连接都重新建立仪表计数基线，避免混入上一个设备的累计量。
+        self._modbus_last_total = None
+        self._csv_modbus_last_total = None
+        self._edge_metric_results.clear()
+        self._edge_tdoa_keys.clear()
+        self._edge_tdoa_seen.clear()
+        self._clear_tdoa_history()
         self._edge_mode = enabled
+        self.edge_source_controls.setVisible(enabled)
         if enabled:
+            if self.is_recording:
+                self.toggle_csv_recording()
             if self.tdoa_worker.isRunning():
                 self.tdoa_worker.stop()
             self.cb_tdoa.setChecked(True)
             self.tdoa_status_label.setText("TDOA: 等待服务器结果")
             self.btn_csv_log.setEnabled(False)
             self.btn_csv_log.setToolTip("Edge 模式下正式记录由服务器集中保存")
+            self._render_edge_metrics()
         else:
             self.btn_csv_log.setEnabled(True)
             self.btn_csv_log.setToolTip("")
+            if self.cb_tdoa.isChecked():
+                self.on_tdoa_toggled(True)
 
     def update_edge_waveform(self, new_data):
         """仅在 Mac 本地绘制 Edge 发布的原始波形，不执行本地算法。"""
@@ -497,9 +549,68 @@ class SignalTracesTab(QWidget):
 
     def update_from_edge_event(self, event):
         """消费服务器通过 Edge 转发的分析、Modbus 和连接状态事件。"""
+        if not self._edge_mode:
+            return
         event_type = event.get("type", "")
         if event_type == "analysis.result":
-            data = event
+            data = event.get("data", event)
+            self._edge_metric_results["waveform"] = data
+            self._render_edge_metrics()
+            self._apply_edge_tdoa(data, analysis=True)
+        elif event_type == "tdoa.result":
+            self._apply_edge_tdoa(event.get("data", {}))
+        elif event_type == "modbus.result":
+            self._edge_metric_results["modbus"] = event.get("data", {})
+            self._render_edge_metrics()
+        elif event_type == "edge.local.ready":
+            self._edge_metric_results.clear()
+            self._edge_tdoa_keys.clear()
+            self._edge_tdoa_seen.clear()
+            self._clear_tdoa_history()
+            self._render_edge_metrics()
+        elif event_type == "edge.connection":
+            status = event.get("data", {}).get("status", "unknown")
+            self.tdoa_status_label.setText(f"Server: {status}")
+        elif event_type == "service.error":
+            message = event.get("data", {}).get("message", "unknown error")
+            self.tdoa_status_label.setText(f"Server Error: {message}")
+
+    def _apply_edge_tdoa(self, data, analysis=False):
+        if not self.cb_tdoa.isChecked():
+            return
+        angle = data.get("tdoa_angle_deg" if analysis else "angle_deg")
+        reliable = data.get("tdoa_reliable" if analysis else "reliable", False)
+        if angle is None or not reliable:
+            return
+        key = None
+        if data.get("session_id") is not None and data.get("sequence") is not None:
+            key = (str(data["session_id"]), int(data["sequence"]))
+        if key is not None:
+            if key in self._edge_tdoa_seen:
+                return
+            if len(self._edge_tdoa_keys) >= 256:
+                self._edge_tdoa_seen.remove(self._edge_tdoa_keys.popleft())
+            self._edge_tdoa_keys.append(key)
+            self._edge_tdoa_seen.add(key)
+        cost = data.get("tdoa_cost" if analysis else "cost") or 0.0
+        self.on_tdoa_result(float(angle), float(cost), None)
+
+    def _render_edge_metrics(self, *_):
+        if not getattr(self, "_edge_mode", False):
+            return
+        source = self.metric_source_combo.currentData()
+        if source == "auto":
+            source = "waveform" if "waveform" in self._edge_metric_results else "modbus"
+        data = self._edge_metric_results.get(source)
+        if data is None:
+            self.impact_label.setText("Impact rate = -- /s")
+            self.mass_label.setText("Mass rate = -- g/s")
+            self.alarm_indicator.setText("WAITING")
+            self.alarm_indicator.setStyleSheet("background-color: #ddd; color: #333;")
+            self.th_curve.setData([])
+            self._update_edge_efficiency(0.0)
+            return
+        if source == "waveform":
             ips = int(data.get("ips", 0))
             mass_rate = float(data.get("mass_rate", 0.0))
             threshold = float(data.get("threshold", self.user_threshold))
@@ -508,20 +619,7 @@ class SignalTracesTab(QWidget):
             self.th_curve.setData(np.full(self.data_len, threshold))
             self._update_edge_efficiency(mass_rate)
             self._set_alarm_style(data.get("alarm_level", "normal"))
-            angle = data.get("tdoa_angle_deg")
-            if angle is not None and data.get("tdoa_reliable", False):
-                self.on_tdoa_result(
-                    float(angle), float(data.get("tdoa_cost") or 0.0), None
-                )
-        elif event_type == "tdoa.result":
-            data = event.get("data", {})
-            angle = data.get("angle_deg")
-            if angle is not None and data.get("reliable", False):
-                self.on_tdoa_result(
-                    float(angle), float(data.get("cost") or 0.0), None
-                )
-        elif event_type == "modbus.result":
-            data = event.get("data", {})
+        else:
             self.impact_label.setText(
                 f"Impact rate = {int(data.get('ips', 0))} /s  [Server Modbus]"
             )
@@ -533,12 +631,7 @@ class SignalTracesTab(QWidget):
             level = "critical" if relay & 0x02 else "caution" if relay & 0x01 else "normal"
             self._set_alarm_style(level)
             self._update_edge_efficiency(mass_rate)
-        elif event_type == "edge.connection":
-            status = event.get("data", {}).get("status", "unknown")
-            self.tdoa_status_label.setText(f"Server: {status}")
-        elif event_type == "service.error":
-            message = event.get("data", {}).get("message", "unknown error")
-            self.tdoa_status_label.setText(f"Server Error: {message}")
+            self.th_curve.setData([])
 
     def _update_edge_efficiency(self, mass_rate: float):
         try:
@@ -591,7 +684,8 @@ class SignalTracesTab(QWidget):
                 print(f"[UI] 🧵 收到 Modbus 字典: {new_data}")
                 ips = new_data.get('ips', 0)
                 mass_rate = new_data.get('mass_rate', 0.0)
-                total_mass = new_data.get('total_mass', 0.0)
+                total_mass = float(new_data['total_mass'])
+                self._modbus_last_total = total_mass
                 relay_status = new_data.get('relay_status', 0)
                 current_ma = new_data.get('current_ma', 4.0)
                 
@@ -600,8 +694,7 @@ class SignalTracesTab(QWidget):
                 processed_signal = self.voltage_data  # 保持波形
                 threshold_limit = self.user_threshold
                 
-                # Modbus 没有"窗口能量"概念，跳过标定累加
-                shift = 50  # 给 CSV 一个合理的 dt 基值（0.05s）
+                # Modbus 累计量来自仪表寄存器；不使用波形采样点推算时间。
                 
                 # ---- 更新状态显示 ----
                 self.impact_label.setText(f"Impact rate = {ips} /s  [Modbus]")
@@ -662,7 +755,8 @@ class SignalTracesTab(QWidget):
             
             # ---- 标定累加逻辑 ----
             if getattr(self, 'is_calibrating', False):
-                self.accumulated_energy += window_energy
+                # Integrate window energy per second over this update interval.
+                self.accumulated_energy += window_energy * shift / self.data_len
             
             # ---- 更新 UI 数字 ----
             self.impact_label.setText(f"Impact rate = {ips} /s")
@@ -673,7 +767,7 @@ class SignalTracesTab(QWidget):
             relay_status = None
             
             # ====== 【Modbus 模式跳过】TDOA 切窗打地鼠（波形模式下执行） ======
-            if self.cb_tdoa.isChecked() and ips > 0:
+            if self.cb_tdoa.isChecked() and len(valid_peaks) > 0:
                 # 全局能量重心准星
                 global_max_idx = int(np.argmax(np.abs(self.voltage_data)))
                 
@@ -751,9 +845,15 @@ class SignalTracesTab(QWidget):
         
         # ====== CSV 工业报表数据持久化 ======
         if self.is_recording and self.csv_writer is not None:
-            dt = shift / 1000.0
-            step_mass = mass_rate * dt
-            self.total_mass_recorded += step_mass
+            if isinstance(new_data, dict):
+                previous_total = self._csv_modbus_last_total
+                if previous_total is not None and total_mass >= previous_total:
+                    self.total_mass_recorded += total_mass - previous_total
+                # 计数下降可能是复位、设备更换或回绕，重新取基线。
+                self._csv_modbus_last_total = total_mass
+            else:
+                dt = shift / self.dsp.fs
+                self.total_mass_recorded += mass_rate * dt
             
             now = datetime.now()
             timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -851,6 +951,7 @@ class SignalTracesTab(QWidget):
                 
                 self.is_recording = True
                 self.total_mass_recorded = 0.0
+                self._csv_modbus_last_total = self._modbus_last_total
                 
                 self.btn_csv_log.setText("Stop CSV Log")
                 self.btn_csv_log.setStyleSheet(

@@ -4,6 +4,9 @@ SandAlert PC 是面向海上油气管道含砂监测场景开发的上位机与�
 
 > 当前状态：第一阶段“Mac 边缘采集 + 服务器计算联调”已经完成。代码仍处于研究与工程验证阶段，不应直接作为未经验证的现场安全联锁系统使用。
 
+2026-10-19：第一阶段缺陷修复位于 `codex/stage1-bugfixes`。
+新设备拉取、速率/标定语义变化和测试命令见 [阶段修复与迁移说明](SandAlert_PC_Replica/STAGE1_BUGFIXES.md)；当前进度见 [taskline.md](taskline.md)。
+
 ## 系统架构
 
 ```mermaid
@@ -145,11 +148,13 @@ replay_path = "./runtime/sample_data"
 |---|---|
 | `file` | 回放单通道或四通道 TXT/CSV 波形 |
 | `mock_modbus` | 生成模拟 Modbus 指标 |
-| `file_and_mock_modbus` | 同时回放波形和生成模拟 Modbus，推荐用于联调 |
+| `file_and_mock_modbus` | 同时生成两个独立来源；UI 自动优先波形，也可手动选择 Modbus |
 
 旧版 UI 仍保留虚拟/真实串口、Modbus RTU/TCP 和本地文件回放入口。将真实硬件采集迁移进独立 Edge Service 是后续阶段工作。
 
 ## 标准启动流程
+
+以下为 Edge/计算服务器链路。当前无远程连接时，可先按[本地 Modbus 运行手册](SandAlert_PC_Replica/LOCAL_MODBUS_RUNBOOK.md)使用 UI 直连模拟仪表。
 
 启动顺序应为：服务器 → Mac Edge Service → PyQt UI。
 
@@ -205,10 +210,11 @@ python main.py
 2. 选择默认的 `Edge Service Mode (Local Gateway)`。
 3. 确认 `Edge Gateway` 为 `ws://127.0.0.1:8766`。
 4. 点击 `Save & Connect`。
-5. 在 `Signal Traces` 页面观察实时波形、IPS、Mass Rate、报警状态和 TDOA 方向。
+5. 在 `Signal Traces` 页面选择“指标来源”，观察波形、IPS、Mass Rate、报警及 TDOA。自动模式收到波形结果后优先波形，不再被独立 Modbus 指标覆盖。
 6. 需要查看历史记录时，切换到 `DataLogging` 页面加载 CSV 报告或原始 TXT 文件夹。
 
-在 Edge 模式下，原始波形由 Mac 本地网关直接送给 UI；IPS、Mass Rate、告警和 TDOA 等计算结果来自服务器。
+在 Edge 模式下，原始波形由 Mac 本地网关直接送给 UI；IPS、Mass Rate、告警和 TDOA 来自服务器。
+UI 禁用不生效的本机标定和计算参数；服务器通过配置设置 K、阈值及报警。波形路径输出按窗口时长归一化，旧 K 需重新标定。
 
 ## 无硬件联调
 
@@ -226,7 +232,7 @@ python -m edge.generate_sample runtime/sample_data/tdoa_60deg.txt --angle 60
 python -m edge.probe --seconds 10
 ```
 
-正常输出应包含 `waveforms`、`analysis.result`、`modbus.result`、`tdoa.result` 和 `tdoa_angles`。60° 样本的当前联调结果约为 60.5°。
+正常输出应包含 `waveforms`、`analysis.result`、`modbus.result`、`tdoa.result` 和 `tdoa_angles`。脚本生成的合成样本应在 60° 附近给出可靠方向；具体误差取决于噪声。
 
 ## 测试
 
@@ -244,7 +250,9 @@ cd /home/lks/project/SandAlert_PC/SandAlert_PC_Replica
 /home/lks/miniconda3/envs/core/bin/python -m pytest -q
 ```
 
-当前自动化测试覆盖波形编解码、采集、断线缓存、持久化、WebSocket 服务，以及 TDOA 物理时延窗口、亚采样插值和纯噪声拒绝。
+当前自动化测试覆盖波形编解码、采集、缓存生命周期、持久化、WebSocket、采样率与计量单位、Modbus TCP、CSV、Edge 双源显示/标定范围及 TDOA。
+
+仓库根目录执行 `python scripts/smoke_pipeline.py` 可用临时数据检查完整本机链路，避免重用历史待发缓存。
 
 执行 200 组 TDOA 方法对照评估：
 
@@ -284,8 +292,8 @@ Mac 创建 codex/功能分支
 ssh lab
 cd /home/lks/project/SandAlert_PC
 git fetch origin
-git switch codex/edge-server-phase1
-git pull --ff-only origin codex/edge-server-phase1
+git switch codex/stage1-bugfixes
+git pull --ff-only origin codex/stage1-bugfixes
 ```
 
 不要直接在服务器修改源码。若服务器工作区出现未提交改动，应先检查来源，不要使用 `git reset --hard` 覆盖。

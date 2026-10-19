@@ -7,7 +7,7 @@ import logging
 from websockets.asyncio.client import connect
 
 from edge.local_gateway import LocalGateway
-from edge.spool import DurableSpool
+from edge.spool import DurableSpool, spool_io
 from shared.contracts import EdgeHello, parse_json_message
 from shared.settings import EdgeSettings
 
@@ -51,13 +51,20 @@ class UpstreamClient:
                     delay = 1.0
                     receiver = asyncio.create_task(self._receive(websocket, stop_event))
                     sender = asyncio.create_task(self._send(websocket, stop_event))
-                    done, pending = await asyncio.wait(
-                        {receiver, sender}, return_when=asyncio.FIRST_EXCEPTION
-                    )
-                    for task in pending:
-                        task.cancel()
-                    for task in done:
-                        task.result()
+                    try:
+                        done, _ = await asyncio.wait(
+                            {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for task in done:
+                            task.result()
+                        if not stop_event.is_set():
+                            raise ConnectionError("server websocket closed")
+                    finally:
+                        # Cancellation must also join both tasks before the
+                        # owner closes SQLite in run_edge's cleanup.
+                        receiver.cancel()
+                        sender.cancel()
+                        await asyncio.gather(receiver, sender, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -74,11 +81,11 @@ class UpstreamClient:
 
     async def _send(self, websocket, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
-            item = await asyncio.to_thread(self.spool.first_pending)
+            item = await spool_io(self.spool.first_pending)
             if item is None:
                 await asyncio.sleep(0.05)
                 continue
-            payload = await asyncio.to_thread(self.spool.read, item)
+            payload = await spool_io(self.spool.read, item)
             key = (item.session_id, item.sequence, item.kind)
             event = asyncio.Event()
             self._ack_events[key] = event
@@ -100,7 +107,7 @@ class UpstreamClient:
             payload = parse_json_message(raw)
             if payload["type"] == "ack":
                 key = (payload["session_id"], payload["sequence"], payload["kind"])
-                await asyncio.to_thread(
+                await spool_io(
                     self.spool.acknowledge,
                     payload["session_id"], payload["sequence"], payload["kind"],
                 )

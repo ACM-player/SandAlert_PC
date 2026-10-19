@@ -8,6 +8,7 @@ threshold_margin = 0.008
 calibration_factor = 1.2
 caution_limit = 0.05
 alarm_limit = 0.10
+# Legacy fallback only; actual DSP sampling frequency follows waveform fs_hz.
 dsp_sample_rate = 1000
 tdoa_enabled = true
 # 现场频谱确认前保持关闭；启用后仅在 GCC-PHAT 频域内保留该频带。

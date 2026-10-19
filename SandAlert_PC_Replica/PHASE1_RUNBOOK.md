@@ -45,3 +45,10 @@ tmux new -s sandalert-server
 The server checkout is deployment-only. Make source changes on the Mac, push a
 task branch to GitHub, then fetch and check out the exact branch/commit on the
 server.
+
+## October 2026 fixes
+
+Use branch `codex/stage1-bugfixes`; see [migration and verification](STAGE1_BUGFIXES.md).
+DSP follows waveform `fs_hz`, rates are normalized by window duration, and old calibration factors must be re-established.
+The Edge UI selects one metric source and deduplicates TDOA events. Calibration in Edge mode is configured on the server, not through the local calibration buttons.
+Run `python scripts/smoke_pipeline.py` from the repository root for a disposable local end-to-end check.

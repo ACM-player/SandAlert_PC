@@ -17,11 +17,12 @@ class ServerSettings(BaseModel):
     token: str = "change-me"
     database_url: str = "sqlite:///./runtime/sandalert.sqlite3"
     waveform_dir: Path = Path("./runtime/waveforms")
-    threshold_margin: float = 0.008
-    calibration_factor: float = 1.2
+    threshold_margin: float = Field(default=0.008, ge=0, allow_inf_nan=False)
+    calibration_factor: float = Field(default=1.2, gt=0, allow_inf_nan=False)
     caution_limit: float = 0.05
     alarm_limit: float = 0.10
-    dsp_sample_rate: int = 1000
+    # Legacy configuration key; incoming waveform fs_hz is authoritative.
+    dsp_sample_rate: int = Field(default=1000, gt=40)
     tdoa_enabled: bool = True
     tdoa_bandpass_enabled: bool = False
     tdoa_band_low_hz: float = Field(default=100_000.0, gt=0)

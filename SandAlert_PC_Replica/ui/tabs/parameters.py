@@ -45,6 +45,9 @@ class ParametersTab(QWidget):
         self.p160_input = QLineEdit("0.008") # 统一标定为 0.008V，过滤湍流噪声
         self.p160_input.setPlaceholderText("Enter threshold voltage...")
         form_layout.addRow("Threshold (P160) [V]:", self.p160_input)
+        self.sample_rate_input = QLineEdit("1000")
+        self.sample_rate_input.setToolTip("本机串口/文件没有采样率元数据，请按实际采集参数填写；Edge 使用波形元数据")
+        form_layout.addRow("Local Waveform Sample Rate [Hz]:", self.sample_rate_input)
         
         self.p_no_input = QLineEdit()
         self.p_val_input = QLineEdit()

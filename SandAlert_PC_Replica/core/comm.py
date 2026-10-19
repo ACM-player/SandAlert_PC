@@ -320,7 +320,7 @@ class ModbusReaderThread(QThread):
       - 从机地址 (Slave ID): 126
     
     读取逻辑：
-      - 发送 client.read_input_registers(address=0, count=11, slave=126)
+      - 发送 client.read_input_registers(address=0, count=11, device_id=126)
       - 从 result.registers（长度 11）中按索引解包
       - 通过 data_received 发射 dict 给 UI 线程
     
@@ -438,7 +438,7 @@ class ModbusReaderThread(QThread):
                 result = self.client.read_input_registers(
                     address=self.READ_ADDRESS,
                     count=self.READ_COUNT,
-                    slave=self.MODBUS_SLAVE_ID,
+                    device_id=self.MODBUS_SLAVE_ID,
                 )
 
                 # ---- 检查读取是否成功 ----
